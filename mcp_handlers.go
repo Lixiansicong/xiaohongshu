@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/sirupsen/logrus"
-	"strings"
 	"time"
+
+	"github.com/sirupsen/logrus"
+	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
+	"strings"
 )
 
 // MCP 工具处理函数
@@ -517,6 +519,79 @@ func (s *AppServer) handlePostComment(ctx context.Context, args map[string]inter
 
 	// 返回成功结果，只包含feed_id
 	resultText := fmt.Sprintf("评论发表成功 - Feed ID: %s", result.FeedID)
+	return &MCPToolResult{
+		Content: []MCPContent{{
+			Type: "text",
+			Text: resultText,
+		}},
+	}
+}
+
+// handleBrowseRecommendations 处理浏览推荐页
+func (s *AppServer) handleBrowseRecommendations(ctx context.Context, args map[string]interface{}) *MCPToolResult {
+	logrus.Info("MCP: 开始浏览推荐页")
+
+	// 解析参数
+	duration, _ := args["duration"].(float64)
+	minScrolls, _ := args["min_scrolls"].(float64)
+	maxScrolls, _ := args["max_scrolls"].(float64)
+	clickProbability, _ := args["click_probability"].(float64)
+	interactProbability, _ := args["interact_probability"].(float64)
+	
+	var comments []string
+	if commentsInterface, ok := args["comments"].([]interface{}); ok {
+		for _, c := range commentsInterface {
+			if commentStr, ok := c.(string); ok {
+				comments = append(comments, commentStr)
+			}
+		}
+	}
+
+	// 构建配置
+	config := xiaohongshu.BrowseConfig{
+		Duration:            int(duration),
+		MinScrolls:          int(minScrolls),
+		MaxScrolls:          int(maxScrolls),
+		ClickProbability:    int(clickProbability),
+		InteractProbability: int(interactProbability),
+		Comments:            comments,
+	}
+
+	logrus.Infof("MCP: 浏览配置 - 时长: %d分钟, 点击概率: %d%%, 互动概率: %d%%", 
+		config.Duration, config.ClickProbability, config.InteractProbability)
+
+	// 执行浏览
+	stats, err := s.xiaohongshuService.BrowseRecommendations(ctx, config)
+	if err != nil {
+		return &MCPToolResult{
+			Content: []MCPContent{{
+				Type: "text",
+				Text: "浏览推荐页失败: " + err.Error(),
+			}},
+			IsError: true,
+		}
+	}
+
+	// 格式化输出
+	resultText := fmt.Sprintf(`浏览推荐页完成！
+
+📊 统计信息:
+- 浏览时长: %v
+- 滚动次数: %d
+- 点击笔记: %d 个
+- 点赞: %d 次
+- 收藏: %d 次  
+- 评论: %d 次
+- 浏览笔记: %d 个`,
+		stats.Duration.Round(time.Second),
+		stats.ScrollCount,
+		stats.ClickCount,
+		stats.LikeCount,
+		stats.FavoriteCount,
+		stats.CommentCount,
+		len(stats.ViewedNotes),
+	)
+
 	return &MCPToolResult{
 		Content: []MCPContent{{
 			Type: "text",

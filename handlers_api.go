@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
+	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
 )
 
 // respondError 返回错误响应
@@ -207,4 +208,40 @@ func healthHandler(c *gin.Context) {
 		"account":   "ai-report",
 		"timestamp": "now",
 	}, "服务正常")
+}
+
+// browseRecommendationsHandler 模拟人类浏览推荐页
+func (s *AppServer) browseRecommendationsHandler(c *gin.Context) {
+	var req BrowseRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, http.StatusBadRequest, "INVALID_REQUEST",
+			"请求参数错误", err.Error())
+		return
+	}
+
+	// 转换为内部配置类型
+	config := toBrowseConfig(req)
+
+	// 执行浏览
+	stats, err := s.xiaohongshuService.BrowseRecommendations(c.Request.Context(), config)
+	if err != nil {
+		respondError(c, http.StatusInternalServerError, "BROWSE_FAILED",
+			"浏览推荐页失败", err.Error())
+		return
+	}
+
+	c.Set("account", "ai-report")
+	respondSuccess(c, stats, "浏览推荐页完成")
+}
+
+// toBrowseConfig 转换请求为浏览配置
+func toBrowseConfig(req BrowseRequest) xiaohongshu.BrowseConfig {
+	return xiaohongshu.BrowseConfig{
+		Duration:            req.Duration,
+		MinScrolls:          req.MinScrolls,
+		MaxScrolls:          req.MaxScrolls,
+		ClickProbability:    req.ClickProbability,
+		InteractProbability: req.InteractProbability,
+		Comments:            req.Comments,
+	}
 }

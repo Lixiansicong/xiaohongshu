@@ -64,6 +64,16 @@ type FavoriteFeedArgs struct {
 	Unfavorite bool   `json:"unfavorite,omitempty" jsonschema:"是否取消收藏，true为取消收藏，false或未设置则为收藏"`
 }
 
+// BrowseRecommendationsArgs 浏览推荐页参数
+type BrowseRecommendationsArgs struct {
+	Duration            int      `json:"duration,omitempty" jsonschema:"浏览时长（分钟），默认10分钟"`
+	MinScrolls          int      `json:"min_scrolls,omitempty" jsonschema:"每轮最小滚动次数，默认3次"`
+	MaxScrolls          int      `json:"max_scrolls,omitempty" jsonschema:"每轮最大滚动次数，默认8次"`
+	ClickProbability    int      `json:"click_probability,omitempty" jsonschema:"点击笔记的概率(0-100)，默认30%"`
+	InteractProbability int      `json:"interact_probability,omitempty" jsonschema:"在笔记中互动的概率(0-100)，默认50%。互动包括点赞、收藏和评论"`
+	Comments            []string `json:"comments,omitempty" jsonschema:"评论内容列表（可选），随机选择使用"`
+}
+
 // InitMCPServer 初始化 MCP Server
 func InitMCPServer(appServer *AppServer) *mcp.Server {
 	// 创建 MCP Server
@@ -256,7 +266,27 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		},
 	)
 
-	logrus.Infof("Registered %d MCP tools", 11)
+	// 工具 12: 模拟浏览推荐页
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "browse_recommendations",
+			Description: "模拟人类浏览小红书推荐页，包括滚动、随机点击笔记、浏览评论区，并有概率进行点赞、收藏、评论等互动操作",
+		},
+		func(ctx context.Context, req *mcp.CallToolRequest, args BrowseRecommendationsArgs) (*mcp.CallToolResult, any, error) {
+			argsMap := map[string]interface{}{
+				"duration":             float64(args.Duration),
+				"min_scrolls":          float64(args.MinScrolls),
+				"max_scrolls":          float64(args.MaxScrolls),
+				"click_probability":    float64(args.ClickProbability),
+				"interact_probability": float64(args.InteractProbability),
+				"comments":             convertStringsToInterfaces(args.Comments),
+			}
+			result := appServer.handleBrowseRecommendations(ctx, argsMap)
+			return convertToMCPResult(result), nil, nil
+		},
+	)
+
+	logrus.Infof("Registered %d MCP tools", 12)
 }
 
 // convertToMCPResult 将自定义的 MCPToolResult 转换为官方 SDK 的格式

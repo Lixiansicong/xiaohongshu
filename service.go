@@ -443,6 +443,18 @@ func (s *XiaohongshuService) UnfavoriteFeed(ctx context.Context, feedID, xsecTok
 	return &ActionResult{FeedID: feedID, Success: true, Message: "取消收藏成功或未收藏"}, nil
 }
 
+// BrowseRecommendations 模拟人类浏览推荐页
+func (s *XiaohongshuService) BrowseRecommendations(ctx context.Context, config xiaohongshu.BrowseConfig) (*xiaohongshu.BrowseStats, error) {
+	b := newBrowser()
+	defer b.Close()
+
+	page := b.NewPage()
+	defer page.Close()
+
+	action := xiaohongshu.NewBrowseAction(page, config)
+	return action.StartBrowse(ctx)
+}
+
 func newBrowser() *headless_browser.Browser {
 	return browser.NewBrowser(configs.IsHeadless(), browser.WithBinPath(configs.GetBinPath()))
 }

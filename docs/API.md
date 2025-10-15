@@ -460,6 +460,88 @@ Content-Type: application/json
 
 ---
 
+### 7. 浏览推荐页
+
+#### 7.1 模拟人类浏览推荐页
+
+模拟真实用户浏览小红书推荐页，包括滚动、点击、浏览和互动。
+
+**请求**
+```
+POST /api/v1/browse/recommendations
+Content-Type: application/json
+```
+
+**请求体**
+```json
+{
+  "duration": 10,
+  "min_scrolls": 3,
+  "max_scrolls": 8,
+  "click_probability": 40,
+  "interact_probability": 60,
+  "comments": [
+    "看完感觉收获很多，马上就去试试",
+    "这个角度真的很新颖",
+    "说得太对了",
+    "保存下来慢慢看，感谢分享",
+    "这个方法确实挺管用的",
+    "原来还可以这样，学到了",
+    "照片拍得真好看",
+    "有点心动了",
+    "这个必须收藏"
+  ]
+}
+```
+
+**请求参数说明:**
+- `duration` (int, optional): 浏览时长（分钟），默认 10 分钟
+- `min_scrolls` (int, optional): 每轮最小滚动次数，默认 3 次
+- `max_scrolls` (int, optional): 每轮最大滚动次数，默认 8 次
+- `click_probability` (int, optional): 点击笔记的概率(0-100)，默认 30%
+- `interact_probability` (int, optional): 在笔记中互动的概率(0-100)，默认 50%。互动包括点赞、收藏和评论
+- `comments` (array, optional): 评论内容列表，随机选择使用
+
+**响应**
+```json
+{
+  "success": true,
+  "data": {
+    "duration": "10m5s",
+    "scroll_count": 42,
+    "click_count": 15,
+    "like_count": 9,
+    "favorite_count": 9,
+    "comment_count": 6,
+    "viewed_notes": ["note_id_1", "note_id_2", "..."]
+  },
+  "message": "浏览推荐页完成"
+}
+```
+
+**响应字段说明:**
+- `duration`: 实际浏览时长
+- `scroll_count`: 总滚动次数
+- `click_count`: 点击笔记次数
+- `like_count`: 点赞次数
+- `favorite_count`: 收藏次数
+- `comment_count`: 评论次数
+- `viewed_notes`: 浏览过的笔记 ID 列表
+
+**功能特点:**
+- 🖱️ 模拟人类滚动：鼠标滚轮、键盘方向键、JS 滚动随机切换
+- 👆 随机点击笔记：根据设定概率随机进入笔记详情页
+- 👁️ 浏览笔记内容：阅读内容、查看图片/视频、浏览评论区
+- ❤️ 智能互动：根据概率自动点赞、收藏、评论（三个操作一起执行）
+
+**注意事项:**
+- 需要先登录才能使用此功能
+- 建议单次浏览不超过 30 分钟
+- 评论内容建议使用自然、口语化的表达
+- 不建议设置过高的概率，保持真实性
+
+---
+
 ## 注意事项
 
 1. **认证**: 部分 API 需要有效的登录状态，建议先调用登录状态检查接口确认登录。
