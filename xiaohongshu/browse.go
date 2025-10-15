@@ -514,21 +514,19 @@ func (b *BrowseAction) closeNoteModal(page *rod.Page) error {
 }
 
 // interactWithNote 与笔记互动（点赞、收藏、评论一起执行）
-// 注意：这里完全复用了项目现有的互动功能实现：
-// - NewLikeAction: 复用 xiaohongshu/like_favorite.go 中的点赞功能
-// - NewFavoriteAction: 复用 xiaohongshu/like_favorite.go 中的收藏功能
-// - NewCommentFeedAction: 复用 xiaohongshu/comment_feed.go 中的评论功能
-// 与直接调用 MCP 工具（like_feed、favorite_feed、post_comment_to_feed）效果完全一致
+// 注意：这里使用专门的弹窗内互动功能，不会跳转页面
+// 与现有的详情页互动功能（like_favorite.go、comment_feed.go）使用相同的选择器
+// 但直接在当前弹窗内操作，保持用户体验的自然性
 func (b *BrowseAction) interactWithNote(ctx context.Context, feedID, xsecToken string, stats *BrowseStats) error {
 	if feedID == "" || xsecToken == "" {
 		return fmt.Errorf("缺少笔记信息")
 	}
 
 	logrus.Infof("开始与笔记互动: %s", feedID)
+	page := b.page.Context(ctx)
 
-	// 复用现有的点赞功能 (xiaohongshu/like_favorite.go)
-	likeAction := NewLikeAction(b.page)
-	if err := likeAction.Like(ctx, feedID, xsecToken); err != nil {
+	// 在弹窗内进行点赞（不跳转页面）
+	if err := b.likeInModal(page); err != nil {
 		logrus.Warnf("点赞失败: %v", err)
 	} else {
 		stats.LikeCount++
@@ -536,9 +534,8 @@ func (b *BrowseAction) interactWithNote(ctx context.Context, feedID, xsecToken s
 		time.Sleep(randomDuration(500, 1000))
 	}
 
-	// 复用现有的收藏功能 (xiaohongshu/like_favorite.go)
-	favoriteAction := NewFavoriteAction(b.page)
-	if err := favoriteAction.Favorite(ctx, feedID, xsecToken); err != nil {
+	// 在弹窗内进行收藏（不跳转页面）
+	if err := b.favoriteInModal(page); err != nil {
 		logrus.Warnf("收藏失败: %v", err)
 	} else {
 		stats.FavoriteCount++
@@ -546,11 +543,10 @@ func (b *BrowseAction) interactWithNote(ctx context.Context, feedID, xsecToken s
 		time.Sleep(randomDuration(500, 1000))
 	}
 
-	// 复用现有的评论功能 (xiaohongshu/comment_feed.go)
+	// 在弹窗内进行评论（不跳转页面）
 	if len(b.config.Comments) > 0 && rand.Intn(100) < 70 { // 70% 概率评论
 		comment := b.config.Comments[rand.Intn(len(b.config.Comments))]
-		commentAction := NewCommentFeedAction(b.page)
-		if err := commentAction.PostComment(ctx, feedID, xsecToken, comment); err != nil {
+		if err := b.commentInModal(page, comment); err != nil {
 			logrus.Warnf("评论失败: %v", err)
 		} else {
 			stats.CommentCount++
@@ -560,6 +556,144 @@ func (b *BrowseAction) interactWithNote(ctx context.Context, feedID, xsecToken s
 	}
 
 	return nil
+}
+
+// likeInModal 在弹窗内进行点赞操作
+func (b *BrowseAction) likeInModal(page *rod.Page) error {
+	// 使用与详情页相同的选择器，但不跳转页面
+	// 选择器来自 like_favorite.go 中的 SelectorLikeButton
+	selector := ".interact-container .left .like-lottie"
+	
+	// 尝试多个可能的点赞按钮选择器（弹窗内可能略有不同）
+	selectors := []string{
+		selector,                                    // 详情页选择器
+		".note-detail-modal .interact-container .left .like-lottie", // 弹窗内选择器
+		".modal .interact-container .left .like-lottie",             // 通用弹窗选择器
+		".like-lottie",                             // 简化选择器
+		"[class*='like']",                          // 包含like的class
+	}
+	
+	for _, sel := range selectors {
+		if elem, err := page.Element(sel); err == nil {
+			if visible, _ := elem.Visible(); visible {
+				logrus.Debugf("使用选择器点赞: %s", sel)
+				elem.MustClick()
+				return nil
+			}
+		}
+	}
+	
+	return fmt.Errorf("未找到点赞按钮")
+}
+
+// favoriteInModal 在弹窗内进行收藏操作
+func (b *BrowseAction) favoriteInModal(page *rod.Page) error {
+	// 使用与详情页相同的选择器，但不跳转页面
+	// 选择器来自 like_favorite.go 中的 SelectorCollectButton
+	selector := ".interact-container .left .reds-icon.collect-icon"
+	
+	// 尝试多个可能的收藏按钮选择器（弹窗内可能略有不同）
+	selectors := []string{
+		selector,                                    // 详情页选择器
+		".note-detail-modal .interact-container .left .reds-icon.collect-icon", // 弹窗内选择器
+		".modal .interact-container .left .reds-icon.collect-icon",             // 通用弹窗选择器
+		".collect-icon",                            // 简化选择器
+		"[class*='collect']",                       // 包含collect的class
+	}
+	
+	for _, sel := range selectors {
+		if elem, err := page.Element(sel); err == nil {
+			if visible, _ := elem.Visible(); visible {
+				logrus.Debugf("使用选择器收藏: %s", sel)
+				elem.MustClick()
+				return nil
+			}
+		}
+	}
+	
+	return fmt.Errorf("未找到收藏按钮")
+}
+
+// commentInModal 在弹窗内进行评论操作
+func (b *BrowseAction) commentInModal(page *rod.Page, content string) error {
+	// 尝试多个可能的评论输入框选择器（弹窗内可能与详情页不同）
+	inputSelectors := []string{
+		"div.input-box div.content-edit span",      // 详情页选择器（来自comment_feed.go）
+		".note-detail-modal div.input-box div.content-edit span", // 弹窗内选择器
+		".modal div.input-box div.content-edit span",             // 通用弹窗选择器
+		".comment-input span",                      // 简化选择器
+		"[placeholder*='评论']",                     // 通过placeholder查找
+	}
+	
+	// 先点击评论输入框
+	var inputElem *rod.Element
+	for _, sel := range inputSelectors {
+		if elem, err := page.Element(sel); err == nil {
+			if visible, _ := elem.Visible(); visible {
+				logrus.Debugf("找到评论输入框: %s", sel)
+				elem.MustClick()
+				inputElem = elem
+				break
+			}
+		}
+	}
+	
+	if inputElem == nil {
+		return fmt.Errorf("未找到评论输入框")
+	}
+	
+	time.Sleep(randomDuration(300, 600))
+	
+	// 查找实际的文本输入元素
+	textInputSelectors := []string{
+		"div.input-box div.content-edit p.content-input", // 详情页选择器
+		".note-detail-modal div.input-box div.content-edit p.content-input", // 弹窗内选择器
+		".modal div.input-box div.content-edit p.content-input",             // 通用弹窗选择器
+		".content-input",                               // 简化选择器
+		"textarea",                                     // 通用textarea
+		"input[type='text']",                          // 通用文本输入
+	}
+	
+	var textElem *rod.Element
+	for _, sel := range textInputSelectors {
+		if elem, err := page.Element(sel); err == nil {
+			if visible, _ := elem.Visible(); visible {
+				logrus.Debugf("找到文本输入框: %s", sel)
+				textElem = elem
+				break
+			}
+		}
+	}
+	
+	if textElem == nil {
+		return fmt.Errorf("未找到文本输入框")
+	}
+	
+	// 输入评论内容
+	textElem.MustInput(content)
+	time.Sleep(randomDuration(500, 1000))
+	
+	// 查找并点击提交按钮
+	submitSelectors := []string{
+		"div.bottom button.submit",                 // 详情页选择器
+		".note-detail-modal div.bottom button.submit", // 弹窗内选择器
+		".modal div.bottom button.submit",             // 通用弹窗选择器
+		"button.submit",                            // 简化选择器
+		"button[type='submit']",                    // 通用提交按钮
+		"button:contains('发布')",                   // 通过文本查找
+	}
+	
+	for _, sel := range submitSelectors {
+		if elem, err := page.Element(sel); err == nil {
+			if visible, _ := elem.Visible(); visible {
+				logrus.Debugf("找到提交按钮: %s", sel)
+				elem.MustClick()
+				return nil
+			}
+		}
+	}
+	
+	return fmt.Errorf("未找到提交按钮")
 }
 
 // randomDuration 生成随机时长（毫秒）
