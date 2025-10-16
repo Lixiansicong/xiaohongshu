@@ -404,16 +404,16 @@ func (s *AppServer) handleLikeFeed(ctx context.Context, args map[string]interfac
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作失败: 缺少xsec_token参数"}}, IsError: true}
 	}
 	unlike, _ := args["unlike"].(bool)
-	
+
 	var res *ActionResult
 	var err error
-	
+
 	if unlike {
 		res, err = s.xiaohongshuService.UnlikeFeed(ctx, feedID, xsecToken)
 	} else {
 		res, err = s.xiaohongshuService.LikeFeed(ctx, feedID, xsecToken)
 	}
-	
+
 	if err != nil {
 		action := "点赞"
 		if unlike {
@@ -421,7 +421,7 @@ func (s *AppServer) handleLikeFeed(ctx context.Context, args map[string]interfac
 		}
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: action + "失败: " + err.Error()}}, IsError: true}
 	}
-	
+
 	action := "点赞"
 	if unlike {
 		action = "取消点赞"
@@ -440,16 +440,16 @@ func (s *AppServer) handleFavoriteFeed(ctx context.Context, args map[string]inte
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作失败: 缺少xsec_token参数"}}, IsError: true}
 	}
 	unfavorite, _ := args["unfavorite"].(bool)
-	
+
 	var res *ActionResult
 	var err error
-	
+
 	if unfavorite {
 		res, err = s.xiaohongshuService.UnfavoriteFeed(ctx, feedID, xsecToken)
 	} else {
 		res, err = s.xiaohongshuService.FavoriteFeed(ctx, feedID, xsecToken)
 	}
-	
+
 	if err != nil {
 		action := "收藏"
 		if unfavorite {
@@ -457,7 +457,7 @@ func (s *AppServer) handleFavoriteFeed(ctx context.Context, args map[string]inte
 		}
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: action + "失败: " + err.Error()}}, IsError: true}
 	}
-	
+
 	action := "收藏"
 	if unfavorite {
 		action = "取消收藏"
@@ -537,7 +537,7 @@ func (s *AppServer) handleBrowseRecommendations(ctx context.Context, args map[st
 	maxScrolls, _ := args["max_scrolls"].(float64)
 	clickProbability, _ := args["click_probability"].(float64)
 	interactProbability, _ := args["interact_probability"].(float64)
-	
+
 	var comments []string
 	if commentsInterface, ok := args["comments"].([]interface{}); ok {
 		for _, c := range commentsInterface {
@@ -557,7 +557,7 @@ func (s *AppServer) handleBrowseRecommendations(ctx context.Context, args map[st
 		Comments:            comments,
 	}
 
-	logrus.Infof("MCP: 浏览配置 - 时长: %d分钟, 点击概率: %d%%, 互动概率: %d%%", 
+	logrus.Infof("MCP: 浏览配置 - 时长: %d分钟, 点击概率: %d%%, 互动概率: %d%%",
 		config.Duration, config.ClickProbability, config.InteractProbability)
 
 	// 执行浏览

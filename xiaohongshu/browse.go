@@ -37,13 +37,13 @@ type BrowseAction struct {
 
 // BrowseStats 浏览统计
 type BrowseStats struct {
-	Duration       time.Duration `json:"duration"`
-	ScrollCount    int           `json:"scroll_count"`
-	ClickCount     int           `json:"click_count"`
-	LikeCount      int           `json:"like_count"`
-	FavoriteCount  int           `json:"favorite_count"`
-	CommentCount   int           `json:"comment_count"`
-	ViewedNotes    []string      `json:"viewed_notes"`
+	Duration      time.Duration `json:"duration"`
+	ScrollCount   int           `json:"scroll_count"`
+	ClickCount    int           `json:"click_count"`
+	LikeCount     int           `json:"like_count"`
+	FavoriteCount int           `json:"favorite_count"`
+	CommentCount  int           `json:"comment_count"`
+	ViewedNotes   []string      `json:"viewed_notes"`
 }
 
 // NewBrowseAction 创建浏览动作
@@ -87,7 +87,7 @@ func (b *BrowseAction) StartBrowse(ctx context.Context) (*BrowseStats, error) {
 
 	// 浏览时长
 	browseUntil := time.Now().Add(time.Duration(b.config.Duration) * time.Minute)
-	
+
 	// 刷新机制：模拟真实用户每隔几分钟刷新页面获取新内容
 	// 随机设置第一次刷新时间：2-5分钟后
 	nextRefreshTime := time.Now().Add(randomRefreshInterval())
@@ -105,16 +105,16 @@ func (b *BrowseAction) StartBrowse(ctx context.Context) (*BrowseStats, error) {
 				logrus.Info("刷新推荐页以获取新内容")
 				page.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
 				time.Sleep(randomDuration(1500, 3000)) // 刷新后等待加载
-				
+
 				// 设置下一次刷新时间：2-5分钟后
 				nextRefreshTime = time.Now().Add(randomRefreshInterval())
 				remainingMinutes := time.Until(browseUntil).Minutes()
 				if remainingMinutes > 0 {
-					logrus.Infof("页面已刷新，计划在 %.1f 分钟后再次刷新（剩余浏览时间: %.1f 分钟）", 
+					logrus.Infof("页面已刷新，计划在 %.1f 分钟后再次刷新（剩余浏览时间: %.1f 分钟）",
 						time.Until(nextRefreshTime).Minutes(), remainingMinutes)
 				}
 			}
-			
+
 			// 执行一轮浏览
 			if err := b.browseRound(ctx, stats); err != nil {
 				logrus.Warnf("浏览出错: %v", err)
@@ -167,11 +167,11 @@ func (b *BrowseAction) humanLikeScroll(page *rod.Page) error {
 	// 随机选择滚动方式
 	scrollType := rand.Intn(3)
 
-    switch scrollType {
-    case 0:
-        // 使用鼠标滚轮
-        scrollAmount := rand.Intn(700) + 600 // 600-1300像素（加长）
-        page.Mouse.MustScroll(0, float64(scrollAmount))
+	switch scrollType {
+	case 0:
+		// 使用鼠标滚轮
+		scrollAmount := rand.Intn(700) + 600 // 600-1300像素（加长）
+		page.Mouse.MustScroll(0, float64(scrollAmount))
 
 	case 1:
 		// 使用键盘方向键
@@ -181,10 +181,10 @@ func (b *BrowseAction) humanLikeScroll(page *rod.Page) error {
 			time.Sleep(randomDuration(100, 300))
 		}
 
-    case 2:
-        // 使用 JavaScript 滚动
-        scrollAmount := rand.Intn(800) + 700 // 700-1500像素（加长）
-        page.MustEval(fmt.Sprintf(`() => window.scrollBy({top: %d, behavior: 'smooth'})`, scrollAmount))
+	case 2:
+		// 使用 JavaScript 滚动
+		scrollAmount := rand.Intn(800) + 700 // 700-1500像素（加长）
+		page.MustEval(fmt.Sprintf(`() => window.scrollBy({top: %d, behavior: 'smooth'})`, scrollAmount))
 	}
 
 	time.Sleep(randomDuration(300, 800)) // 滚动后短暂停留
@@ -199,10 +199,10 @@ func (b *BrowseAction) humanLikeScroll(page *rod.Page) error {
 func (b *BrowseAction) humanLikeScrollWithBacktrack(page *rod.Page) error {
 	// 随机选择滚动方式
 	scrollType := rand.Intn(3)
-	
-    // 主滚动动作
-    scrollAmount := rand.Intn(900) + 700 // 700-1600像素（加长）
-	
+
+	// 主滚动动作
+	scrollAmount := rand.Intn(900) + 700 // 700-1600像素（加长）
+
 	switch scrollType {
 	case 0:
 		// 使用鼠标滚轮（分段滚动更自然）
@@ -214,7 +214,7 @@ func (b *BrowseAction) humanLikeScrollWithBacktrack(page *rod.Page) error {
 				segmentScroll = totalScroll - (segmentScroll * (segments - 1))
 			}
 			page.Mouse.MustScroll(0, float64(segmentScroll))
-			
+
 			// 插入短暂停：0.2-1.2s
 			time.Sleep(randomDuration(200, 1200))
 		}
@@ -234,17 +234,17 @@ func (b *BrowseAction) humanLikeScrollWithBacktrack(page *rod.Page) error {
 		// 等待滚动动画完成
 		time.Sleep(randomDuration(600, 1000))
 	}
-	
+
 	// 滚动段时长：0.6-2.5s
 	time.Sleep(randomDuration(600, 2500))
-	
+
 	// 回滚概率：7-18%
 	backtrackProbability := rand.Intn(12) + 7 // 7-18
 	if rand.Intn(100) < backtrackProbability {
 		logrus.Debug("触发回滚行为")
 		// 向上回滚一小段距离（通常是滚动距离的 20-40%）
 		backtrackAmount := -(scrollAmount * (rand.Intn(20) + 20) / 100)
-		
+
 		if scrollType == 1 {
 			// 键盘回滚
 			times := rand.Intn(2) + 1
@@ -256,11 +256,11 @@ func (b *BrowseAction) humanLikeScrollWithBacktrack(page *rod.Page) error {
 			// 鼠标或JS回滚
 			page.Mouse.MustScroll(0, float64(backtrackAmount))
 		}
-		
+
 		// 回滚后的停顿
 		time.Sleep(randomDuration(500, 1500))
 	}
-	
+
 	return nil
 }
 
@@ -274,28 +274,28 @@ func (b *BrowseAction) clickAndViewNote(ctx context.Context, stats *BrowseStats)
 		return fmt.Errorf("未找到笔记列表: %v", err)
 	}
 
-    // 基于已浏览去重，优先选择未浏览的笔记
-    viewed := make(map[string]struct{}, len(stats.ViewedNotes))
-    for _, id := range stats.ViewedNotes {
-        viewed[id] = struct{}{}
-    }
-    unviewed := make([]Feed, 0, len(feeds))
-    for _, f := range feeds {
-        if f.ID == "" {
-            continue
-        }
-        if _, ok := viewed[f.ID]; !ok {
-            unviewed = append(unviewed, f)
-        }
-    }
+	// 基于已浏览去重，优先选择未浏览的笔记
+	viewed := make(map[string]struct{}, len(stats.ViewedNotes))
+	for _, id := range stats.ViewedNotes {
+		viewed[id] = struct{}{}
+	}
+	unviewed := make([]Feed, 0, len(feeds))
+	for _, f := range feeds {
+		if f.ID == "" {
+			continue
+		}
+		if _, ok := viewed[f.ID]; !ok {
+			unviewed = append(unviewed, f)
+		}
+	}
 
-    var selectedFeed Feed
-    if len(unviewed) > 0 {
-        selectedFeed = unviewed[rand.Intn(len(unviewed))]
-    } else {
-        // 回退：都看过则仍随机一个，但尽量通过滚动引入新内容
-        selectedFeed = feeds[rand.Intn(len(feeds))]
-    }
+	var selectedFeed Feed
+	if len(unviewed) > 0 {
+		selectedFeed = unviewed[rand.Intn(len(unviewed))]
+	} else {
+		// 回退：都看过则仍随机一个，但尽量通过滚动引入新内容
+		selectedFeed = feeds[rand.Intn(len(feeds))]
+	}
 	feedID := selectedFeed.ID
 	xsecToken := selectedFeed.XsecToken
 
@@ -311,19 +311,19 @@ func (b *BrowseAction) clickAndViewNote(ctx context.Context, stats *BrowseStats)
 		return fmt.Errorf("未找到可见笔记卡片")
 	}
 
-    // 在可见卡片中寻找对应 feedID 的卡片；找不到则回退随机
-    var selectedCard *rod.Element
-    for _, card := range noteCards {
-        id, token, _ := b.extractNoteInfo(card)
-        if id == feedID || (id != "" && id == selectedFeed.ID) {
-            selectedCard = card
-            break
-        }
-        _ = token // 保持一致性，后续如需校验可用
-    }
-    if selectedCard == nil {
-        selectedCard = noteCards[rand.Intn(len(noteCards))]
-    }
+	// 在可见卡片中寻找对应 feedID 的卡片；找不到则回退随机
+	var selectedCard *rod.Element
+	for _, card := range noteCards {
+		id, token, _ := b.extractNoteInfo(card)
+		if id == feedID || (id != "" && id == selectedFeed.ID) {
+			selectedCard = card
+			break
+		}
+		_ = token // 保持一致性，后续如需校验可用
+	}
+	if selectedCard == nil {
+		selectedCard = noteCards[rand.Intn(len(noteCards))]
+	}
 
 	// 点击进入笔记
 	if err := selectedCard.Click(proto.InputMouseButtonLeft, 1); err != nil {
@@ -562,7 +562,7 @@ func (b *BrowseAction) scrollCommentArea(page *rod.Page) error {
 		// 检查是否已经到底部（滚动位置几乎没有变化）
 		if afterScroll-beforeScroll < 50 { // 如果滚动距离小于50像素，认为到底了
 			logrus.Info("评论区已滚动到底部")
-			
+
 			// 有30%概率回滚一下
 			if rand.Intn(100) < 30 {
 				logrus.Info("回滚评论区")
@@ -581,10 +581,10 @@ func (b *BrowseAction) scrollCommentArea(page *rod.Page) error {
 func (b *BrowseAction) hasComments(page *rod.Page) (bool, error) {
 	// 小红书评论区的选择器
 	commentSelectors := []string{
-		".comment-item",          // 评论项
+		".comment-item",                     // 评论项
 		".comments-container .comment-item", // 评论容器内的评论项
-		"[class*='comment-item']", // 包含comment-item的class
-		".comment-list .item",     // 评论列表项
+		"[class*='comment-item']",           // 包含comment-item的class
+		".comment-list .item",               // 评论列表项
 	}
 
 	for _, selector := range commentSelectors {
@@ -638,25 +638,25 @@ func (b *BrowseAction) getScrollPosition(page *rod.Page) (float64, error) {
 func (b *BrowseAction) closeNoteModal(page *rod.Page) error {
 	// 随机选择关闭方式，模拟真实用户习惯
 	closeMethod := rand.Intn(10)
-	
+
 	if closeMethod < 6 { // 60% 概率使用 ESC 键
 		logrus.Debug("使用 ESC 键关闭笔记")
 		page.MustElement("body").MustKeyActions().Press(input.Escape).MustDo()
 		time.Sleep(randomDuration(300, 600))
 		return nil
 	}
-	
+
 	// 40% 概率点击遮罩层（空白处）
 	logrus.Debug("点击遮罩层关闭笔记")
-	
+
 	// 尝试多种可能的遮罩层选择器
 	maskSelectors := []string{
-		"div.close", // 关闭按钮
-		"div[class*='mask']", // 遮罩层
+		"div.close",             // 关闭按钮
+		"div[class*='mask']",    // 遮罩层
 		"div[class*='overlay']", // 覆盖层
-		".note-detail-mask", // 笔记详情遮罩
+		".note-detail-mask",     // 笔记详情遮罩
 	}
-	
+
 	for _, selector := range maskSelectors {
 		if mask, err := page.Element(selector); err == nil {
 			if visible, _ := mask.Visible(); visible {
@@ -667,12 +667,12 @@ func (b *BrowseAction) closeNoteModal(page *rod.Page) error {
 			}
 		}
 	}
-	
+
 	// 如果找不到遮罩层，使用 ESC 作为降级方案
 	logrus.Debug("未找到遮罩层，使用 ESC 键作为降级方案")
 	page.MustElement("body").MustKeyActions().Press(input.Escape).MustDo()
 	time.Sleep(randomDuration(300, 600))
-	
+
 	return nil
 }
 
@@ -688,24 +688,24 @@ func (b *BrowseAction) interactWithNote(ctx context.Context, feedID, xsecToken s
 	logrus.Infof("开始与笔记互动: %s", feedID)
 	page := b.page.Context(ctx)
 
-    // 在弹窗内进行点赞（不跳转页面）
-    if err := b.likeInModal(page); err != nil {
+	// 在弹窗内进行点赞（不跳转页面）
+	if err := b.likeInModal(page); err != nil {
 		logrus.Warnf("点赞失败: %v", err)
 	} else {
 		stats.LikeCount++
 		logrus.Debug("点赞成功")
-        // 点赞后延迟 0.5-3.0 秒再进行收藏
-        time.Sleep(randomDuration(500, 3000))
+		// 点赞后延迟 0.5-3.0 秒再进行收藏
+		time.Sleep(randomDuration(500, 3000))
 	}
 
-    // 在弹窗内进行收藏（不跳转页面）
-    if err := b.favoriteInModal(page); err != nil {
+	// 在弹窗内进行收藏（不跳转页面）
+	if err := b.favoriteInModal(page); err != nil {
 		logrus.Warnf("收藏失败: %v", err)
 	} else {
 		stats.FavoriteCount++
 		logrus.Debug("收藏成功")
-        // 收藏后延迟 1-3 秒再进行评论
-        time.Sleep(randomDuration(1000, 3000))
+		// 收藏后延迟 1-3 秒再进行评论
+		time.Sleep(randomDuration(1000, 3000))
 	}
 
 	// 在弹窗内进行评论（不跳转页面）
@@ -789,7 +789,7 @@ func (b *BrowseAction) getRandomCommentText(page *rod.Page) (string, error) {
 
 	// 从找到的评论元素中随机选择一个
 	randomComment := allComments[rand.Intn(len(allComments))]
-	
+
 	// 获取评论文本
 	commentText, err := randomComment.Text()
 	if err != nil {
@@ -797,7 +797,7 @@ func (b *BrowseAction) getRandomCommentText(page *rod.Page) (string, error) {
 	}
 
 	commentText = strings.TrimSpace(commentText)
-	
+
 	// 过滤掉太短或太长的评论
 	if len(commentText) < 5 {
 		logrus.Info("评论文本太短，重新获取")
@@ -820,16 +820,16 @@ func (b *BrowseAction) likeInModal(page *rod.Page) error {
 	// 使用与详情页相同的选择器，但不跳转页面
 	// 选择器来自 like_favorite.go 中的 SelectorLikeButton
 	selector := ".interact-container .left .like-lottie"
-	
+
 	// 尝试多个可能的点赞按钮选择器（弹窗内可能略有不同）
 	selectors := []string{
-		selector,                                    // 详情页选择器
+		selector, // 详情页选择器
 		".note-detail-modal .interact-container .left .like-lottie", // 弹窗内选择器
 		".modal .interact-container .left .like-lottie",             // 通用弹窗选择器
-		".like-lottie",                             // 简化选择器
-		"[class*='like']",                          // 包含like的class
+		".like-lottie",    // 简化选择器
+		"[class*='like']", // 包含like的class
 	}
-	
+
 	for _, sel := range selectors {
 		if elem, err := page.Element(sel); err == nil {
 			if visible, _ := elem.Visible(); visible {
@@ -839,7 +839,7 @@ func (b *BrowseAction) likeInModal(page *rod.Page) error {
 			}
 		}
 	}
-	
+
 	return fmt.Errorf("未找到点赞按钮")
 }
 
@@ -848,16 +848,16 @@ func (b *BrowseAction) favoriteInModal(page *rod.Page) error {
 	// 使用与详情页相同的选择器，但不跳转页面
 	// 选择器来自 like_favorite.go 中的 SelectorCollectButton
 	selector := ".interact-container .left .reds-icon.collect-icon"
-	
+
 	// 尝试多个可能的收藏按钮选择器（弹窗内可能略有不同）
 	selectors := []string{
-		selector,                                    // 详情页选择器
+		selector, // 详情页选择器
 		".note-detail-modal .interact-container .left .reds-icon.collect-icon", // 弹窗内选择器
 		".modal .interact-container .left .reds-icon.collect-icon",             // 通用弹窗选择器
-		".collect-icon",                            // 简化选择器
-		"[class*='collect']",                       // 包含collect的class
+		".collect-icon",      // 简化选择器
+		"[class*='collect']", // 包含collect的class
 	}
-	
+
 	for _, sel := range selectors {
 		if elem, err := page.Element(sel); err == nil {
 			if visible, _ := elem.Visible(); visible {
@@ -867,7 +867,7 @@ func (b *BrowseAction) favoriteInModal(page *rod.Page) error {
 			}
 		}
 	}
-	
+
 	return fmt.Errorf("未找到收藏按钮")
 }
 
@@ -875,13 +875,13 @@ func (b *BrowseAction) favoriteInModal(page *rod.Page) error {
 func (b *BrowseAction) commentInModal(page *rod.Page, content string) error {
 	// 尝试多个可能的评论输入框选择器（弹窗内可能与详情页不同）
 	inputSelectors := []string{
-		"div.input-box div.content-edit span",      // 详情页选择器（来自comment_feed.go）
+		"div.input-box div.content-edit span",                    // 详情页选择器（来自comment_feed.go）
 		".note-detail-modal div.input-box div.content-edit span", // 弹窗内选择器
 		".modal div.input-box div.content-edit span",             // 通用弹窗选择器
-		".comment-input span",                      // 简化选择器
-		"[placeholder*='评论']",                     // 通过placeholder查找
+		".comment-input span",                                    // 简化选择器
+		"[placeholder*='评论']",                                    // 通过placeholder查找
 	}
-	
+
 	// 先点击评论输入框
 	var inputElem *rod.Element
 	for _, sel := range inputSelectors {
@@ -894,23 +894,23 @@ func (b *BrowseAction) commentInModal(page *rod.Page, content string) error {
 			}
 		}
 	}
-	
+
 	if inputElem == nil {
 		return fmt.Errorf("未找到评论输入框")
 	}
-	
+
 	time.Sleep(randomDuration(300, 600))
-	
+
 	// 查找实际的文本输入元素
 	textInputSelectors := []string{
-		"div.input-box div.content-edit p.content-input", // 详情页选择器
+		"div.input-box div.content-edit p.content-input",                    // 详情页选择器
 		".note-detail-modal div.input-box div.content-edit p.content-input", // 弹窗内选择器
 		".modal div.input-box div.content-edit p.content-input",             // 通用弹窗选择器
-		".content-input",                               // 简化选择器
-		"textarea",                                     // 通用textarea
-		"input[type='text']",                          // 通用文本输入
+		".content-input",     // 简化选择器
+		"textarea",           // 通用textarea
+		"input[type='text']", // 通用文本输入
 	}
-	
+
 	var textElem *rod.Element
 	for _, sel := range textInputSelectors {
 		if elem, err := page.Element(sel); err == nil {
@@ -921,25 +921,25 @@ func (b *BrowseAction) commentInModal(page *rod.Page, content string) error {
 			}
 		}
 	}
-	
+
 	if textElem == nil {
 		return fmt.Errorf("未找到文本输入框")
 	}
-	
+
 	// 输入评论内容
 	textElem.MustInput(content)
 	time.Sleep(randomDuration(500, 1000))
-	
+
 	// 查找并点击提交按钮
 	submitSelectors := []string{
-		"div.bottom button.submit",                 // 详情页选择器
+		"div.bottom button.submit",                    // 详情页选择器
 		".note-detail-modal div.bottom button.submit", // 弹窗内选择器
 		".modal div.bottom button.submit",             // 通用弹窗选择器
-		"button.submit",                            // 简化选择器
-		"button[type='submit']",                    // 通用提交按钮
-		"button:contains('发布')",                   // 通过文本查找
+		"button.submit",                               // 简化选择器
+		"button[type='submit']",                       // 通用提交按钮
+		"button:contains('发布')",                       // 通过文本查找
 	}
-	
+
 	for _, sel := range submitSelectors {
 		if elem, err := page.Element(sel); err == nil {
 			if visible, _ := elem.Visible(); visible {
@@ -949,7 +949,7 @@ func (b *BrowseAction) commentInModal(page *rod.Page, content string) error {
 			}
 		}
 	}
-	
+
 	return fmt.Errorf("未找到提交按钮")
 }
 
@@ -968,4 +968,3 @@ func randomRefreshInterval() time.Duration {
 	totalSeconds := minutes*60 + seconds
 	return time.Duration(totalSeconds) * time.Second
 }
-
