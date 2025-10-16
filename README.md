@@ -250,6 +250,42 @@ https://github.com/user-attachments/assets/cc385b6c-422c-489b-a5fc-63e92c695b80
 
 <img width="1840" height="582" alt="CleanShot 2025-09-05 at 01 33 13@2x" src="https://github.com/user-attachments/assets/fb367944-dc48-4bbd-8ece-934caa86323e" />
 
+## 📚 文档导航
+
+本项目文档已重新整理，方便查找和使用：
+
+### 核心文档
+- **[文档索引](./docs/README.md)** - 📖 查看所有文档的完整索引
+- **[HTTP API 文档](./docs/API.md)** - 🔌 HTTP API 接口使用指南
+- **[变更日志](./CHANGELOG.md)** - 📝 项目更新历史
+
+### 功能文档
+- **[浏览推荐页功能](./docs/BROWSE_FEATURE.md)** - 🖱️ 完整的浏览功能使用指南
+  - 包含评论功能使用说明（禁用/自定义/自动获取）
+  - 工作流程、防检测策略、配置建议
+- **[浏览功能快速开始](./docs/BROWSE_QUICKSTART.md)** - ⚡ 快速上手指南
+- **[行为优化文档](./docs/BEHAVIOR_OPTIMIZATION.md)** - 🎯 基于真实用户行为的优化
+
+### 技术文档
+- **[技术实现细节](./docs/TECHNICAL_DETAILS.md)** - 🔧 数据获取方式和核心原理
+- **[代码复用说明](./docs/BROWSE_CODE_REUSE.md)** - 🔄 浏览功能代码架构
+
+### 部署指南
+- **[部署指南](./docs/DEPLOYMENT.md)** - 🚀 完整的部署指南
+  - Docker 部署（推荐）
+  - macOS 后台运行
+  - Windows 部署
+  - 监控和故障排查
+
+### 集成示例
+- **[集成示例](./docs/EXAMPLES.md)** - 💡 各种客户端集成指南
+  - Cherry Studio（推荐新手）
+  - AnythingLLM（工作流自动化）
+  - Claude Code + Kimi-K2（国内模型）
+  - N8N（高级工作流）
+
+---
+
 ## 1. 使用教程
 
 ### 1.1. 快速开始（推荐）

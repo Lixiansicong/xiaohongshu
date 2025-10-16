@@ -546,6 +546,12 @@ func (s *AppServer) handleBrowseRecommendations(ctx context.Context, args map[st
 			}
 		}
 	}
+	
+	// 解析 enable_comment 参数
+	var enableComment *bool
+	if enableCommentVal, ok := args["enable_comment"].(bool); ok {
+		enableComment = &enableCommentVal
+	}
 
 	// 构建配置
 	config := xiaohongshu.BrowseConfig{
@@ -554,6 +560,7 @@ func (s *AppServer) handleBrowseRecommendations(ctx context.Context, args map[st
 		MaxScrolls:          int(maxScrolls),
 		ClickProbability:    int(clickProbability),
 		InteractProbability: int(interactProbability),
+		EnableComment:       enableComment,
 		Comments:            comments,
 	}
 

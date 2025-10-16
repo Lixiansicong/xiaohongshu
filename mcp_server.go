@@ -71,7 +71,8 @@ type BrowseRecommendationsArgs struct {
 	MaxScrolls          int      `json:"max_scrolls,omitempty" jsonschema:"每轮最大滚动次数，默认8次"`
 	ClickProbability    int      `json:"click_probability,omitempty" jsonschema:"点击笔记的概率(0-100)，默认30%"`
 	InteractProbability int      `json:"interact_probability,omitempty" jsonschema:"在笔记中互动的概率(0-100)，默认50%。互动包括点赞、收藏和评论"`
-	Comments            []string `json:"comments,omitempty" jsonschema:"评论内容列表（可选），随机选择使用"`
+	EnableComment       *bool    `json:"enable_comment,omitempty" jsonschema:"是否启用评论功能，默认true。如果为false则不会评论"`
+	Comments            []string `json:"comments,omitempty" jsonschema:"评论内容列表（可选）。如果提供则使用提供的内容，否则自动从评论区获取"`
 }
 
 // InitMCPServer 初始化 MCP Server
@@ -280,6 +281,9 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 				"click_probability":    float64(args.ClickProbability),
 				"interact_probability": float64(args.InteractProbability),
 				"comments":             convertStringsToInterfaces(args.Comments),
+			}
+			if args.EnableComment != nil {
+				argsMap["enable_comment"] = *args.EnableComment
 			}
 			result := appServer.handleBrowseRecommendations(ctx, argsMap)
 			return convertToMCPResult(result), nil, nil
