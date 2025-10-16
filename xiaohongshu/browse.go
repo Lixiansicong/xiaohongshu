@@ -87,11 +87,6 @@ func (b *BrowseAction) StartBrowse(ctx context.Context) (*BrowseStats, error) {
 
 	// 浏览时长
 	browseUntil := time.Now().Add(time.Duration(b.config.Duration) * time.Minute)
-	
-	// 刷新机制：模拟真实用户每隔几分钟刷新页面获取新内容
-	// 随机设置第一次刷新时间：2-5分钟后
-	nextRefreshTime := time.Now().Add(randomRefreshInterval())
-	logrus.Infof("计划在 %.1f 分钟后刷新页面", time.Until(nextRefreshTime).Minutes())
 
 	for time.Now().Before(browseUntil) {
 		select {
@@ -100,21 +95,6 @@ func (b *BrowseAction) StartBrowse(ctx context.Context) (*BrowseStats, error) {
 			stats.Duration = time.Since(startTime)
 			return stats, ctx.Err()
 		default:
-			// 检查是否到了刷新时间
-			if time.Now().After(nextRefreshTime) {
-				logrus.Info("刷新推荐页以获取新内容")
-				page.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
-				time.Sleep(randomDuration(1500, 3000)) // 刷新后等待加载
-				
-				// 设置下一次刷新时间：2-5分钟后
-				nextRefreshTime = time.Now().Add(randomRefreshInterval())
-				remainingMinutes := time.Until(browseUntil).Minutes()
-				if remainingMinutes > 0 {
-					logrus.Infof("页面已刷新，计划在 %.1f 分钟后再次刷新（剩余浏览时间: %.1f 分钟）", 
-						time.Until(nextRefreshTime).Minutes(), remainingMinutes)
-				}
-			}
-			
 			// 执行一轮浏览
 			if err := b.browseRound(ctx, stats); err != nil {
 				logrus.Warnf("浏览出错: %v", err)
@@ -167,11 +147,11 @@ func (b *BrowseAction) humanLikeScroll(page *rod.Page) error {
 	// 随机选择滚动方式
 	scrollType := rand.Intn(3)
 
-    switch scrollType {
-    case 0:
-        // 使用鼠标滚轮
-        scrollAmount := rand.Intn(700) + 600 // 600-1300像素（加长）
-        page.Mouse.MustScroll(0, float64(scrollAmount))
+	switch scrollType {
+	case 0:
+		// 使用鼠标滚轮
+		scrollAmount := rand.Intn(400) + 300 // 300-700像素
+		page.Mouse.MustScroll(0, float64(scrollAmount))
 
 	case 1:
 		// 使用键盘方向键
@@ -181,10 +161,10 @@ func (b *BrowseAction) humanLikeScroll(page *rod.Page) error {
 			time.Sleep(randomDuration(100, 300))
 		}
 
-    case 2:
-        // 使用 JavaScript 滚动
-        scrollAmount := rand.Intn(800) + 700 // 700-1500像素（加长）
-        page.MustEval(fmt.Sprintf(`() => window.scrollBy({top: %d, behavior: 'smooth'})`, scrollAmount))
+	case 2:
+		// 使用 JavaScript 滚动
+		scrollAmount := rand.Intn(500) + 400 // 400-900像素
+		page.MustEval(fmt.Sprintf(`() => window.scrollBy({top: %d, behavior: 'smooth'})`, scrollAmount))
 	}
 
 	time.Sleep(randomDuration(300, 800)) // 滚动后短暂停留
@@ -200,8 +180,8 @@ func (b *BrowseAction) humanLikeScrollWithBacktrack(page *rod.Page) error {
 	// 随机选择滚动方式
 	scrollType := rand.Intn(3)
 	
-    // 主滚动动作
-    scrollAmount := rand.Intn(900) + 700 // 700-1600像素（加长）
+	// 主滚动动作
+	scrollAmount := rand.Intn(400) + 300 // 300-700像素
 	
 	switch scrollType {
 	case 0:
@@ -274,28 +254,8 @@ func (b *BrowseAction) clickAndViewNote(ctx context.Context, stats *BrowseStats)
 		return fmt.Errorf("未找到笔记列表: %v", err)
 	}
 
-    // 基于已浏览去重，优先选择未浏览的笔记
-    viewed := make(map[string]struct{}, len(stats.ViewedNotes))
-    for _, id := range stats.ViewedNotes {
-        viewed[id] = struct{}{}
-    }
-    unviewed := make([]Feed, 0, len(feeds))
-    for _, f := range feeds {
-        if f.ID == "" {
-            continue
-        }
-        if _, ok := viewed[f.ID]; !ok {
-            unviewed = append(unviewed, f)
-        }
-    }
-
-    var selectedFeed Feed
-    if len(unviewed) > 0 {
-        selectedFeed = unviewed[rand.Intn(len(unviewed))]
-    } else {
-        // 回退：都看过则仍随机一个，但尽量通过滚动引入新内容
-        selectedFeed = feeds[rand.Intn(len(feeds))]
-    }
+	// 随机选择一个笔记
+	selectedFeed := feeds[rand.Intn(len(feeds))]
 	feedID := selectedFeed.ID
 	xsecToken := selectedFeed.XsecToken
 
@@ -311,19 +271,8 @@ func (b *BrowseAction) clickAndViewNote(ctx context.Context, stats *BrowseStats)
 		return fmt.Errorf("未找到可见笔记卡片")
 	}
 
-    // 在可见卡片中寻找对应 feedID 的卡片；找不到则回退随机
-    var selectedCard *rod.Element
-    for _, card := range noteCards {
-        id, token, _ := b.extractNoteInfo(card)
-        if id == feedID || (id != "" && id == selectedFeed.ID) {
-            selectedCard = card
-            break
-        }
-        _ = token // 保持一致性，后续如需校验可用
-    }
-    if selectedCard == nil {
-        selectedCard = noteCards[rand.Intn(len(noteCards))]
-    }
+	// 随机选择一个可见的笔记卡片点击
+	selectedCard := noteCards[rand.Intn(len(noteCards))]
 
 	// 点击进入笔记
 	if err := selectedCard.Click(proto.InputMouseButtonLeft, 1); err != nil {
@@ -504,132 +453,20 @@ func (b *BrowseAction) browseNoteContent(page *rod.Page) error {
 		time.Sleep(randomDuration(800, 1500))
 	}
 
-	// 智能浏览评论区（无论视频还是图文，都有概率滚动评论区）
-	if rand.Intn(100) < 70 { // 70% 概率浏览评论区
-		if err := b.scrollCommentArea(page); err != nil {
-			logrus.Warnf("滚动评论区失败: %v", err)
+	// 浏览评论区
+	if rand.Intn(100) < 60 { // 60% 概率浏览评论
+		logrus.Debug("浏览评论区")
+		page.Mouse.MustScroll(0, float64(rand.Intn(400)+300))
+		time.Sleep(randomDuration(1500, 3000))
+
+		// 再滚动一次查看更多评论
+		if rand.Intn(100) < 40 {
+			page.Mouse.MustScroll(0, float64(rand.Intn(300)+200))
+			time.Sleep(randomDuration(1000, 2000))
 		}
 	}
 
 	return nil
-}
-
-// scrollCommentArea 智能滚动评论区
-// 自动检测评论区是否有评论，以及是否到达底部
-func (b *BrowseAction) scrollCommentArea(page *rod.Page) error {
-	logrus.Info("开始浏览评论区")
-
-	// 先滚动到评论区位置
-	page.Mouse.MustScroll(0, float64(rand.Intn(400)+300))
-	time.Sleep(randomDuration(1000, 2000))
-
-	// 检查评论区是否有评论
-	hasComments, err := b.hasComments(page)
-	if err != nil {
-		logrus.Warnf("检查评论区失败: %v", err)
-		return fmt.Errorf("检查评论区失败: %v", err)
-	}
-
-	if !hasComments {
-		logrus.Info("评论区没有评论，跳过滚动")
-		return nil
-	}
-
-	logrus.Info("评论区有评论，开始滚动")
-
-	// 随机滚动2-5次，每次检测是否到底部
-	maxScrolls := rand.Intn(4) + 2 // 2-5次
-	for i := 0; i < maxScrolls; i++ {
-		// 获取滚动前的位置
-		beforeScroll, err := b.getScrollPosition(page)
-		if err != nil {
-			logrus.Warnf("获取滚动位置失败: %v", err)
-			break
-		}
-
-		// 执行滚动
-		scrollAmount := rand.Intn(400) + 300 // 300-700像素
-		page.Mouse.MustScroll(0, float64(scrollAmount))
-		time.Sleep(randomDuration(1200, 2500))
-
-		// 获取滚动后的位置
-		afterScroll, err := b.getScrollPosition(page)
-		if err != nil {
-			logrus.Warnf("获取滚动位置失败: %v", err)
-			break
-		}
-
-		// 检查是否已经到底部（滚动位置几乎没有变化）
-		if afterScroll-beforeScroll < 50 { // 如果滚动距离小于50像素，认为到底了
-			logrus.Info("评论区已滚动到底部")
-			
-			// 有30%概率回滚一下
-			if rand.Intn(100) < 30 {
-				logrus.Info("回滚评论区")
-				backAmount := rand.Intn(300) + 200 // 回滚200-500像素
-				page.Mouse.MustScroll(0, float64(-backAmount))
-				time.Sleep(randomDuration(800, 1500))
-			}
-			break
-		}
-	}
-
-	return nil
-}
-
-// hasComments 检查评论区是否有评论
-func (b *BrowseAction) hasComments(page *rod.Page) (bool, error) {
-	// 小红书评论区的选择器
-	commentSelectors := []string{
-		".comment-item",          // 评论项
-		".comments-container .comment-item", // 评论容器内的评论项
-		"[class*='comment-item']", // 包含comment-item的class
-		".comment-list .item",     // 评论列表项
-	}
-
-	for _, selector := range commentSelectors {
-		elements, err := page.Elements(selector)
-		if err == nil && len(elements) > 0 {
-			logrus.Infof("通过选择器 %s 找到 %d 条评论", selector, len(elements))
-			return true, nil
-		}
-	}
-
-	// 尝试通过JavaScript检查
-	hasComments := page.MustEval(`() => {
-		const commentContainers = document.querySelectorAll('[class*="comment"]');
-		for (let container of commentContainers) {
-			if (container.innerText && container.innerText.trim().length > 10) {
-				return true;
-			}
-		}
-		return false;
-	}`).Bool()
-
-	if hasComments {
-		logrus.Info("通过JavaScript检测到评论")
-	} else {
-		logrus.Info("未检测到任何评论")
-	}
-
-	return hasComments, nil
-}
-
-// getScrollPosition 获取当前滚动位置
-func (b *BrowseAction) getScrollPosition(page *rod.Page) (float64, error) {
-	position := page.MustEval(`() => {
-		// 尝试获取笔记详情弹窗内的滚动位置
-		const modal = document.querySelector('.note-detail-modal') || 
-		              document.querySelector('.modal') || 
-		              document.querySelector('[class*="detail"]');
-		if (modal) {
-			const scrollContainer = modal.querySelector('[class*="scroll"]') || modal;
-			return scrollContainer.scrollTop || window.pageYOffset || document.documentElement.scrollTop;
-		}
-		return window.pageYOffset || document.documentElement.scrollTop;
-	}`).Num()
-
-	return position, nil
 }
 
 // closeNoteModal 关闭笔记弹窗（模拟真实用户的退出行为）
@@ -688,131 +525,37 @@ func (b *BrowseAction) interactWithNote(ctx context.Context, feedID, xsecToken s
 	logrus.Infof("开始与笔记互动: %s", feedID)
 	page := b.page.Context(ctx)
 
-    // 在弹窗内进行点赞（不跳转页面）
-    if err := b.likeInModal(page); err != nil {
+	// 在弹窗内进行点赞（不跳转页面）
+	if err := b.likeInModal(page); err != nil {
 		logrus.Warnf("点赞失败: %v", err)
 	} else {
 		stats.LikeCount++
 		logrus.Debug("点赞成功")
-        // 点赞后延迟 0.5-3.0 秒再进行收藏
-        time.Sleep(randomDuration(500, 3000))
+		time.Sleep(randomDuration(500, 1000))
 	}
 
-    // 在弹窗内进行收藏（不跳转页面）
-    if err := b.favoriteInModal(page); err != nil {
+	// 在弹窗内进行收藏（不跳转页面）
+	if err := b.favoriteInModal(page); err != nil {
 		logrus.Warnf("收藏失败: %v", err)
 	} else {
 		stats.FavoriteCount++
 		logrus.Debug("收藏成功")
-        // 收藏后延迟 1-3 秒再进行评论
-        time.Sleep(randomDuration(1000, 3000))
+		time.Sleep(randomDuration(500, 1000))
 	}
 
 	// 在弹窗内进行评论（不跳转页面）
-	if rand.Intn(100) < 50 { // 50% 概率评论
-		// 从评论区复制一条评论作为评论内容（最保守的方法）
-		comment, err := b.getRandomCommentText(page)
-		if err != nil || comment == "" {
-			logrus.Warnf("获取评论文本失败，跳过评论: %v", err)
+	if len(b.config.Comments) > 0 && rand.Intn(100) < 70 { // 70% 概率评论
+		comment := b.config.Comments[rand.Intn(len(b.config.Comments))]
+		if err := b.commentInModal(page, comment); err != nil {
+			logrus.Warnf("评论失败: %v", err)
 		} else {
-			if err := b.commentInModal(page, comment); err != nil {
-				logrus.Warnf("评论失败: %v", err)
-			} else {
-				stats.CommentCount++
-				logrus.Debugf("评论成功: %s", comment)
-				time.Sleep(randomDuration(800, 1500))
-			}
+			stats.CommentCount++
+			logrus.Debugf("评论成功: %s", comment)
+			time.Sleep(randomDuration(800, 1500))
 		}
 	}
 
 	return nil
-}
-
-// getRandomCommentText 从评论区获取一条随机评论的文本内容
-func (b *BrowseAction) getRandomCommentText(page *rod.Page) (string, error) {
-	logrus.Info("尝试从评论区获取评论文本")
-
-	// 小红书评论文本的选择器
-	commentTextSelectors := []string{
-		".comment-item .content",           // 评论内容
-		".comment-item .text",              // 评论文本
-		"[class*='comment'] .content",      // 包含comment的class的内容
-		"[class*='comment-item'] .content", // 评论项的内容
-		".comment-list .item .content",     // 评论列表项的内容
-	}
-
-	var allComments []*rod.Element
-
-	// 尝试所有选择器
-	for _, selector := range commentTextSelectors {
-		elements, err := page.Elements(selector)
-		if err == nil && len(elements) > 0 {
-			allComments = append(allComments, elements...)
-		}
-	}
-
-	// 如果没找到，尝试通过JavaScript获取
-	if len(allComments) == 0 {
-		commentTexts := page.MustEval(`() => {
-			const comments = [];
-			const commentElements = document.querySelectorAll('[class*="comment"]');
-			
-			for (let elem of commentElements) {
-				// 查找包含评论文本的子元素
-				const textElem = elem.querySelector('.content') || 
-				                 elem.querySelector('.text') || 
-				                 elem.querySelector('[class*="content"]');
-				
-				if (textElem && textElem.innerText) {
-					const text = textElem.innerText.trim();
-					// 过滤掉太短或太长的评论
-					if (text.length >= 5 && text.length <= 100) {
-						comments.push(text);
-					}
-				}
-			}
-			
-			return comments;
-		}`).Arr()
-
-		if len(commentTexts) > 0 {
-			// 随机选择一条评论
-			randomIndex := rand.Intn(len(commentTexts))
-			commentText := commentTexts[randomIndex].String()
-			logrus.Infof("从JavaScript获取到评论: %s", commentText)
-			return commentText, nil
-		}
-
-		logrus.Info("评论区没有找到评论文本")
-		return "", fmt.Errorf("评论区没有找到评论文本")
-	}
-
-	// 从找到的评论元素中随机选择一个
-	randomComment := allComments[rand.Intn(len(allComments))]
-	
-	// 获取评论文本
-	commentText, err := randomComment.Text()
-	if err != nil {
-		return "", fmt.Errorf("获取评论文本失败: %v", err)
-	}
-
-	commentText = strings.TrimSpace(commentText)
-	
-	// 过滤掉太短或太长的评论
-	if len(commentText) < 5 {
-		logrus.Info("评论文本太短，重新获取")
-		return "", fmt.Errorf("评论文本太短")
-	}
-	if len(commentText) > 100 {
-		// 截取前100个字符
-		runes := []rune(commentText)
-		if len(runes) > 100 {
-			commentText = string(runes[:100])
-		}
-	}
-
-	logrus.Infof("从评论区获取到评论: %s", commentText)
-	return commentText, nil
 }
 
 // likeInModal 在弹窗内进行点赞操作
@@ -956,16 +699,5 @@ func (b *BrowseAction) commentInModal(page *rod.Page, content string) error {
 // randomDuration 生成随机时长（毫秒）
 func randomDuration(min, max int) time.Duration {
 	return time.Duration(rand.Intn(max-min+1)+min) * time.Millisecond
-}
-
-// randomRefreshInterval 生成随机的页面刷新间隔（2-5分钟）
-// 模拟真实用户习惯：每隔几分钟刷新推荐页以获取新内容
-func randomRefreshInterval() time.Duration {
-	// 随机生成 2-5 分钟的间隔
-	minutes := rand.Intn(4) + 2 // 2, 3, 4, 5
-	// 再加上一些随机秒数，让时间更自然 (0-59秒)
-	seconds := rand.Intn(60)
-	totalSeconds := minutes*60 + seconds
-	return time.Duration(totalSeconds) * time.Second
 }
 
