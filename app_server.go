@@ -69,18 +69,3 @@ func (s *AppServer) Start(port string) error {
 
 	return nil
 }
-
-// StartSTDIO 启动 STDIO 模式的 MCP 服务器
-func (s *AppServer) StartSTDIO() error {
-	logrus.Info("MCP Server running in STDIO mode")
-
-	// 使用官方 SDK 的 STDIO 运行方式
-	ctx := context.Background()
-	err := s.mcpServer.Run(ctx, &mcp.StdioTransport{})
-	if err != nil {
-		logrus.Errorf("STDIO 服务器运行失败: %v", err)
-		return err
-	}
-
-	return nil
-}

@@ -73,10 +73,10 @@ type ActionResult struct {
 
 // BrowseRequest 浏览请求
 type BrowseRequest struct {
-	Duration            int      `json:"duration"`             // 浏览时长（分钟）
-	MinScrolls          int      `json:"min_scrolls"`          // 最小滚动次数
-	MaxScrolls          int      `json:"max_scrolls"`          // 最大滚动次数
-	ClickProbability    int      `json:"click_probability"`    // 点击笔记的概率 (0-100)
-	InteractProbability int      `json:"interact_probability"` // 互动概率 (0-100)
-	Comments            []string `json:"comments,omitempty"`   // 评论内容列表
+	Duration            int      `json:"duration"`              // 浏览时长（分钟）
+	MinScrolls          int      `json:"min_scrolls"`           // 最小滚动次数
+	MaxScrolls          int      `json:"max_scrolls"`           // 最大滚动次数
+	ClickProbability    int      `json:"click_probability"`     // 点击笔记的概率 (0-100)
+	InteractProbability int      `json:"interact_probability"`  // 互动概率 (0-100)
+	Comments            []string `json:"comments,omitempty"`    // 评论内容列表
 }
