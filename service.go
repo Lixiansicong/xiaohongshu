@@ -2,10 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -16,6 +14,7 @@ import (
 	"github.com/xpzouying/xiaohongshu-mcp/configs"
 	"github.com/xpzouying/xiaohongshu-mcp/cookies"
 	"github.com/xpzouying/xiaohongshu-mcp/pkg/downloader"
+	"github.com/xpzouying/xiaohongshu-mcp/recommendation"
 	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
 )
 
@@ -416,24 +415,21 @@ func (s *XiaohongshuService) UnfavoriteFeed(ctx context.Context, feedID, xsecTok
 
 // BrowseRecommendations 模拟人类浏览推荐页
 func (s *XiaohongshuService) BrowseRecommendations(ctx context.Context, config xiaohongshu.BrowseConfig) (*xiaohongshu.BrowseStats, error) {
-	page, release := getPageWithRelease()
-	defer release()
-
-	action := xiaohongshu.NewBrowseAction(page, config)
-	stats, err := action.StartBrowse(ctx)
-
-	// 浏览完成后，关闭所有浏览器实例以实现真正的任务退出
-	logrus.Info("推荐页浏览任务完成，关闭所有浏览器实例")
-	browser.GetGlobalManager().CloseBrowser()
-
-	return stats, err
+	return s.browseRecommendationsInternal(ctx, config, false)
 }
 
 // BrowseRecommendationsWithoutComment 模拟人类浏览推荐页（不进行评论）
 func (s *XiaohongshuService) BrowseRecommendationsWithoutComment(ctx context.Context, config xiaohongshu.BrowseConfig) (*xiaohongshu.BrowseStats, error) {
-	// 设置禁用评论
-	disableComment := false
-	config.EnableComment = &disableComment
+	return s.browseRecommendationsInternal(ctx, config, true)
+}
+
+// browseRecommendationsInternal 内部实现，支持普通模式和无评论模式
+func (s *XiaohongshuService) browseRecommendationsInternal(ctx context.Context, config xiaohongshu.BrowseConfig, withoutComment bool) (*xiaohongshu.BrowseStats, error) {
+	if withoutComment {
+		// 强制禁用评论
+		enable := false
+		config.EnableComment = &enable
+	}
 
 	page, release := getPageWithRelease()
 	defer release()
@@ -442,7 +438,11 @@ func (s *XiaohongshuService) BrowseRecommendationsWithoutComment(ctx context.Con
 	stats, err := action.StartBrowse(ctx)
 
 	// 浏览完成后，关闭所有浏览器实例以实现真正的任务退出
-	logrus.Info("推荐页浏览任务完成（无评论模式），关闭所有浏览器实例")
+	if withoutComment {
+		logrus.Info("推荐页浏览任务完成（无评论模式），关闭所有浏览器实例")
+	} else {
+		logrus.Info("推荐页浏览任务完成，关闭所有浏览器实例")
+	}
 	browser.GetGlobalManager().CloseBrowser()
 
 	return stats, err
@@ -450,125 +450,14 @@ func (s *XiaohongshuService) BrowseRecommendationsWithoutComment(ctx context.Con
 
 
 // ParallelInstanceResult 表示单个浏览器实例的浏览结果
-type ParallelInstanceResult struct {
-	InstanceID string                   `json:"instance_id"`
-	Stats      *xiaohongshu.BrowseStats `json:"stats,omitempty"`
-	Error      string                   `json:"error,omitempty"`
-}
+// 使用别名复用 recommendation 包中的定义，避免重复结构体声明
+type ParallelInstanceResult = recommendation.ParallelInstanceResult
 
 // ParallelBrowseRecommendations 使用多个浏览器实例并行浏览推荐页
 // 每个实例拥有独立的 cookies 文件和登录会话，登录等待时间统一为 60 秒
 func (s *XiaohongshuService) ParallelBrowseRecommendations(ctx context.Context, config xiaohongshu.BrowseConfig, instances int) ([]*ParallelInstanceResult, error) {
-	if instances <= 0 {
-		instances = 3
-	}
-
-	results := make([]*ParallelInstanceResult, instances)
-	var wg sync.WaitGroup
-
-	// 登录等待窗口：60 秒
-	loginCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-
-	for i := 0; i < instances; i++ {
-		idx := i
-		instanceID := fmt.Sprintf("instance%d", idx+1)
-		results[idx] = &ParallelInstanceResult{InstanceID: instanceID}
-
-		wg.Add(1)
-		go func(res *ParallelInstanceResult) {
-			defer wg.Done()
-
-			cookiePath := cookies.GetInstanceCookiesFilePath(res.InstanceID)
-			logrus.WithFields(logrus.Fields{
-				"instance":     res.InstanceID,
-				"cookies_path": cookiePath,
-			}).Info("启动并行浏览实例")
-
-			// 为当前实例创建独立浏览器
-			b := browser.NewBrowser(configs.IsHeadless(),
-				browser.WithBinPath(configs.GetBinPath()),
-				browser.WithCookiesPath(cookiePath),
-			)
-			page := b.NewPage()
-			defer func() {
-				// 关闭页面和浏览器，避免资源泄漏
-				if page != nil {
-					page.Close()
-				}
-				if b != nil {
-					b.Close()
-				}
-			}()
-
-			loginAction := xiaohongshu.NewLogin(page)
-
-			// 1. 先尝试使用已有 cookies 自动登录
-			loggedIn, err := loginAction.CheckLoginStatus(ctx)
-			if err == nil && loggedIn {
-				logrus.WithField("instance", res.InstanceID).Info("检测到已登录，直接开始浏览")
-				browseAction := xiaohongshu.NewBrowseAction(page, config)
-				stats, browseErr := browseAction.StartBrowse(ctx)
-				if browseErr != nil {
-					res.Error = browseErr.Error()
-					return
-				}
-				res.Stats = stats
-				// 更新 cookies
-				if err := saveCookiesToPath(page, cookiePath); err != nil {
-					logrus.WithError(err).WithField("instance", res.InstanceID).Warn("保存 cookies 失败")
-				}
-				return
-			}
-
-			// 2. 未登录时，进入登录等待窗口，等待用户扫码登录
-			logrus.WithField("instance", res.InstanceID).Info("未登录，开始等待扫码登录")
-			if ok := loginAction.WaitForLogin(loginCtx); !ok {
-				if loginCtx.Err() != nil {
-					res.Error = "登录等待超时或被取消"
-				} else {
-					res.Error = "登录失败"
-				}
-				return
-			}
-
-			logrus.WithField("instance", res.InstanceID).Info("扫码登录成功，开始浏览推荐页")
-			// 登录成功后立即保存 cookies
-			if err := saveCookiesToPath(page, cookiePath); err != nil {
-				logrus.WithError(err).WithField("instance", res.InstanceID).Warn("保存 cookies 失败")
-			}
-
-			browseAction := xiaohongshu.NewBrowseAction(page, config)
-			stats, browseErr := browseAction.StartBrowse(ctx)
-			if browseErr != nil {
-				res.Error = browseErr.Error()
-				return
-			}
-			res.Stats = stats
-
-			// 浏览完成后再次保存 cookies，保证会话持久化
-			if err := saveCookiesToPath(page, cookiePath); err != nil {
-				logrus.WithError(err).WithField("instance", res.InstanceID).Warn("保存 cookies 失败")
-			}
-		}(results[idx])
-	}
-
-	wg.Wait()
-
-	// 判断是否至少有一个实例成功登录并完成浏览
-	var hasSuccess bool
-	for _, res := range results {
-		if res != nil && res.Stats != nil {
-			hasSuccess = true
-			break
-		}
-	}
-
-	if !hasSuccess {
-		return results, fmt.Errorf("60 秒内没有任何浏览器实例完成登录，任务已终止")
-	}
-
-	return results, nil
+	results, err := recommendation.RunParallelBrowse(ctx, config, instances)
+	return results, err
 }
 
 func newBrowser() *headless_browser.Browser {
@@ -582,21 +471,5 @@ func getPageWithRelease() (*rod.Page, func()) {
 }
 
 func saveCookies(page *rod.Page) error {
-	return saveCookiesToPath(page, cookies.GetCookiesFilePath())
-}
-
-// saveCookiesToPath 将当前页面的 cookies 保存到指定文件路径
-func saveCookiesToPath(page *rod.Page, cookiePath string) error {
-	cks, err := page.Browser().GetCookies()
-	if err != nil {
-		return err
-	}
-
-	data, err := json.Marshal(cks)
-	if err != nil {
-		return err
-	}
-
-	cookieLoader := cookies.NewLoadCookie(cookiePath)
-	return cookieLoader.SaveCookies(data)
+	return recommendation.SavePageCookiesToPath(page, cookies.GetCookiesFilePath())
 }

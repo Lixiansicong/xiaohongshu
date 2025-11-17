@@ -67,10 +67,11 @@ type FavoriteFeedArgs struct {
 // BrowseRecommendationsArgs 浏览推荐页参数
 type BrowseRecommendationsArgs struct {
 	Duration            int      `json:"duration,omitempty" jsonschema:"浏览时长（分钟），默认10分钟"`
-	MinScrolls          int      `json:"min_scrolls,omitempty" jsonschema:"每轮最小滚动次数，默认3次"`
-	MaxScrolls          int      `json:"max_scrolls,omitempty" jsonschema:"每轮最大滚动次数，默认8次"`
-	ClickProbability    int      `json:"click_probability,omitempty" jsonschema:"点击笔记的概率(0-100)，默认30%"`
-	InteractProbability int      `json:"interact_probability,omitempty" jsonschema:"在笔记中互动的概率(0-100)，默认50%。互动包括点赞、收藏和评论"`
+	MinScrolls          int      `json:"min_scrolls,omitempty" jsonschema:"每轮最小滚动次数，默认2次"`
+	MaxScrolls          int      `json:"max_scrolls,omitempty" jsonschema:"每轮最大滚动次数，默认6次"`
+	ClickProbability    int      `json:"click_probability,omitempty" jsonschema:"点击笔记的概率(0-100)，默认65%"`
+	InteractProbability int      `json:"interact_probability,omitempty" jsonschema:"在笔记中互动的概率(0-100)，默认60%。互动包括点赞、收藏和评论"`
+	LikeOnlyProbability int      `json:"like_only_probability,omitempty" jsonschema:"在触发互动时，仅点赞不收藏的概率(0-100)，默认30%"`
 	EnableComment       *bool    `json:"enable_comment,omitempty" jsonschema:"是否启用评论功能，默认true。如果为false则不会评论"`
 	Comments            []string `json:"comments,omitempty" jsonschema:"评论内容列表（可选）。如果提供则使用提供的内容，否则自动从评论区获取"`
 	Instances           int      `json:"instances,omitempty" jsonschema:"并行浏览时使用的浏览器实例数量，默认3个"`
@@ -275,17 +276,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			Description: "模拟人类浏览小红书推荐页，包括滚动、随机点击笔记、浏览评论区，并有概率进行点赞、收藏、评论等互动操作",
 		},
 		func(ctx context.Context, req *mcp.CallToolRequest, args BrowseRecommendationsArgs) (*mcp.CallToolResult, any, error) {
-			argsMap := map[string]interface{}{
-				"duration":             float64(args.Duration),
-				"min_scrolls":          float64(args.MinScrolls),
-				"max_scrolls":          float64(args.MaxScrolls),
-				"click_probability":    float64(args.ClickProbability),
-				"interact_probability": float64(args.InteractProbability),
-				"comments":             convertStringsToInterfaces(args.Comments),
-			}
-			if args.EnableComment != nil {
-				argsMap["enable_comment"] = *args.EnableComment
-			}
+			argsMap := buildBrowseArgsMap(args, false)
 			result := appServer.handleBrowseRecommendations(ctx, argsMap)
 			return convertToMCPResult(result), nil, nil
 		},
@@ -298,15 +289,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			Description: "模拟人类浏览小红书推荐页，包括滚动、随机点击笔记、浏览评论区，并有概率进行点赞、收藏等互动操作，但不会进行评论",
 		},
 		func(ctx context.Context, req *mcp.CallToolRequest, args BrowseRecommendationsArgs) (*mcp.CallToolResult, any, error) {
-			argsMap := map[string]interface{}{
-				"duration":             float64(args.Duration),
-				"min_scrolls":          float64(args.MinScrolls),
-				"max_scrolls":          float64(args.MaxScrolls),
-				"click_probability":    float64(args.ClickProbability),
-				"interact_probability": float64(args.InteractProbability),
-				"comments":             convertStringsToInterfaces(args.Comments),
-				"enable_comment":       false, // 强制禁用评论
-			}
+			argsMap := buildBrowseArgsMap(args, true)
 			result := appServer.handleBrowseRecommendationsWithoutComment(ctx, argsMap)
 			return convertToMCPResult(result), nil, nil
 		},
@@ -323,18 +306,10 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			if instances <= 0 {
 				instances = 3
 			}
-			argsMap := map[string]interface{}{
-				"duration":             float64(args.Duration),
-				"min_scrolls":          float64(args.MinScrolls),
-				"max_scrolls":          float64(args.MaxScrolls),
-				"click_probability":    float64(args.ClickProbability),
-				"interact_probability": float64(args.InteractProbability),
-				"comments":             convertStringsToInterfaces(args.Comments),
-				"instances":            float64(instances),
-			}
-			if args.EnableComment != nil {
-				argsMap["enable_comment"] = *args.EnableComment
-			}
+
+			argsMap := buildBrowseArgsMap(args, false)
+			argsMap["instances"] = float64(instances)
+
 			result := appServer.handleParallelBrowseRecommendations(ctx, argsMap)
 			return convertToMCPResult(result), nil, nil
 		},
@@ -373,6 +348,28 @@ func convertToMCPResult(result *MCPToolResult) *mcp.CallToolResult {
 		IsError: result.IsError,
 	}
 }
+
+// buildBrowseArgsMap 将 BrowseRecommendationsArgs 转换为 handler 使用的通用参数 map
+func buildBrowseArgsMap(args BrowseRecommendationsArgs, forceDisableComment bool) map[string]interface{} {
+	argsMap := map[string]interface{}{
+		"duration":              float64(args.Duration),
+		"min_scrolls":           float64(args.MinScrolls),
+		"max_scrolls":           float64(args.MaxScrolls),
+		"click_probability":     float64(args.ClickProbability),
+		"interact_probability":  float64(args.InteractProbability),
+		"like_only_probability": float64(args.LikeOnlyProbability),
+		"comments":              convertStringsToInterfaces(args.Comments),
+	}
+
+	if forceDisableComment {
+		argsMap["enable_comment"] = false
+	} else if args.EnableComment != nil {
+		argsMap["enable_comment"] = *args.EnableComment
+	}
+
+	return argsMap
+}
+
 
 // convertStringsToInterfaces 辅助函数：将 []string 转换为 []interface{}
 func convertStringsToInterfaces(strs []string) []interface{} {

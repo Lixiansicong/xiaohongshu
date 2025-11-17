@@ -527,16 +527,15 @@ func (s *AppServer) handlePostComment(ctx context.Context, args map[string]inter
 	}
 }
 
-// handleBrowseRecommendations 处理浏览推荐页
-func (s *AppServer) handleBrowseRecommendations(ctx context.Context, args map[string]interface{}) *MCPToolResult {
-	logrus.Info("MCP: 开始浏览推荐页")
 
-	// 解析参数
+// buildBrowseConfigFromArgs 从 MCP 参数构建 BrowseConfig，可选择是否强制禁用评论
+func buildBrowseConfigFromArgs(args map[string]interface{}, forceDisableComment bool) xiaohongshu.BrowseConfig {
 	duration, _ := args["duration"].(float64)
 	minScrolls, _ := args["min_scrolls"].(float64)
 	maxScrolls, _ := args["max_scrolls"].(float64)
 	clickProbability, _ := args["click_probability"].(float64)
 	interactProbability, _ := args["interact_probability"].(float64)
+	likeOnlyProbability, _ := args["like_only_probability"].(float64)
 
 	var comments []string
 	if commentsInterface, ok := args["comments"].([]interface{}); ok {
@@ -547,22 +546,33 @@ func (s *AppServer) handleBrowseRecommendations(ctx context.Context, args map[st
 		}
 	}
 
-	// 解析 enable_comment 参数
 	var enableComment *bool
-	if enableCommentVal, ok := args["enable_comment"].(bool); ok {
-		enableComment = &enableCommentVal
+	if forceDisableComment {
+		v := false
+		enableComment = &v
+	} else {
+		if enableCommentVal, ok := args["enable_comment"].(bool); ok {
+			enableComment = &enableCommentVal
+		}
 	}
 
-	// 构建配置
-	config := xiaohongshu.BrowseConfig{
+	return xiaohongshu.BrowseConfig{
 		Duration:            int(duration),
 		MinScrolls:          int(minScrolls),
 		MaxScrolls:          int(maxScrolls),
 		ClickProbability:    int(clickProbability),
 		InteractProbability: int(interactProbability),
+		LikeOnlyProbability: int(likeOnlyProbability),
 		EnableComment:       enableComment,
 		Comments:            comments,
 	}
+}
+
+// handleBrowseRecommendations 处理浏览推荐页
+func (s *AppServer) handleBrowseRecommendations(ctx context.Context, args map[string]interface{}) *MCPToolResult {
+	logrus.Info("MCP: 开始浏览推荐页")
+
+	config := buildBrowseConfigFromArgs(args, false)
 
 	logrus.Infof("MCP: 浏览配置 - 时长: %d分钟, 点击概率: %d%%, 互动概率: %d%%",
 		config.Duration, config.ClickProbability, config.InteractProbability)
@@ -611,32 +621,7 @@ func (s *AppServer) handleBrowseRecommendations(ctx context.Context, args map[st
 func (s *AppServer) handleBrowseRecommendationsWithoutComment(ctx context.Context, args map[string]interface{}) *MCPToolResult {
 	logrus.Info("MCP: 开始浏览推荐页（无评论模式）")
 
-	// 解析参数
-	duration, _ := args["duration"].(float64)
-	minScrolls, _ := args["min_scrolls"].(float64)
-	maxScrolls, _ := args["max_scrolls"].(float64)
-	clickProbability, _ := args["click_probability"].(float64)
-	interactProbability, _ := args["interact_probability"].(float64)
-
-	var comments []string
-	if commentsInterface, ok := args["comments"].([]interface{}); ok {
-		for _, c := range commentsInterface {
-			if commentStr, ok := c.(string); ok {
-				comments = append(comments, commentStr)
-			}
-		}
-	}
-
-	// 构建配置（强制禁用评论）
-	config := xiaohongshu.BrowseConfig{
-		Duration:            int(duration),
-		MinScrolls:          int(minScrolls),
-		MaxScrolls:          int(maxScrolls),
-		ClickProbability:    int(clickProbability),
-		InteractProbability: int(interactProbability),
-		EnableComment:       func() *bool { b := false; return &b }(), // 强制禁用评论
-		Comments:            comments,
-	}
+	config := buildBrowseConfigFromArgs(args, true)
 
 	logrus.Infof("MCP: 无评论浏览配置 - 时长: %d分钟, 点击概率: %d%%, 互动概率: %d%%",
 		config.Duration, config.ClickProbability, config.InteractProbability)
@@ -685,44 +670,13 @@ func (s *AppServer) handleBrowseRecommendationsWithoutComment(ctx context.Contex
 func (s *AppServer) handleParallelBrowseRecommendations(ctx context.Context, args map[string]interface{}) *MCPToolResult {
 	logrus.Info("MCP: 开始并行浏览推荐页（多实例）")
 
-	// 解析参数
-	duration, _ := args["duration"].(float64)
-	minScrolls, _ := args["min_scrolls"].(float64)
-	maxScrolls, _ := args["max_scrolls"].(float64)
-	clickProbability, _ := args["click_probability"].(float64)
-	interactProbability, _ := args["interact_probability"].(float64)
-
-	var comments []string
-	if commentsInterface, ok := args["comments"].([]interface{}); ok {
-		for _, c := range commentsInterface {
-			if commentStr, ok := c.(string); ok {
-				comments = append(comments, commentStr)
-			}
-		}
-	}
-
-	// 解析 enable_comment 参数
-	var enableComment *bool
-	if enableCommentVal, ok := args["enable_comment"].(bool); ok {
-		enableComment = &enableCommentVal
-	}
+	config := buildBrowseConfigFromArgs(args, false)
 
 	// 并行实例数量
 	instancesFloat, _ := args["instances"].(float64)
 	instances := int(instancesFloat)
 	if instances <= 0 {
 		instances = 3
-	}
-
-	// 构建配置
-	config := xiaohongshu.BrowseConfig{
-		Duration:            int(duration),
-		MinScrolls:          int(minScrolls),
-		MaxScrolls:          int(maxScrolls),
-		ClickProbability:    int(clickProbability),
-		InteractProbability: int(interactProbability),
-		EnableComment:       enableComment,
-		Comments:            comments,
 	}
 
 	logrus.Infof("MCP: 并行浏览配置 - 实例数: %d, 时长: %d分钟, 点击概率: %d%%, 互动概率: %d%%",
@@ -784,4 +738,3 @@ func (s *AppServer) handleParallelBrowseRecommendations(ctx context.Context, arg
 		IsError: isError,
 	}
 }
-

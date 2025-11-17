@@ -2,18 +2,15 @@ package main
 
 import (
     "context"
-    "encoding/json"
     "flag"
     "fmt"
     "math/rand"
-    "sync"
     "time"
 
-    "github.com/go-rod/rod"
     "github.com/sirupsen/logrus"
     "github.com/xpzouying/xiaohongshu-mcp/browser"
     "github.com/xpzouying/xiaohongshu-mcp/configs"
-    "github.com/xpzouying/xiaohongshu-mcp/cookies"
+    "github.com/xpzouying/xiaohongshu-mcp/recommendation"
     "github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
 )
 
@@ -23,24 +20,32 @@ func main() {
     rand.Seed(time.Now().UnixNano())
 
     var (
-        headless           bool
-        binPath            string
-        duration           int
-        minScrolls         int
-        maxScrolls         int
-        clickProbability   int
-        interactProbability int
-        instances          int
-        withoutComment     bool
+        headless             bool
+        binPath              string
+        duration             int
+        minScrolls           int
+        maxScrolls           int
+        clickProbability     int
+        interactProbability  int
+        likeOnlyProbability  int
+        instances            int
+        withoutComment       bool
     )
 
     flag.BoolVar(&headless, "headless", false, "是否无头模式，默认 false（有界面，便于扫码登录）")
     flag.StringVar(&binPath, "bin", "", "浏览器二进制文件路径（可选，不传则使用 ROD_BROWSER_BIN 环境变量）")
-    flag.IntVar(&duration, "duration", 10, "浏览时长（分钟），默认 10 分钟")
-    flag.IntVar(&minScrolls, "min-scrolls", 2, "每轮最小滚动次数，默认 3 次")
-    flag.IntVar(&maxScrolls, "max-scrolls", 6, "每轮最大滚动次数，默认 8 次")
-    flag.IntVar(&clickProbability, "click-probability", 65, "点击笔记的概率(0-100)，默认 30")
-    flag.IntVar(&interactProbability, "interact-probability", 60, "在笔记中互动的概率(0-100)，默认 50")
+    flag.IntVar(&duration, "duration", xiaohongshu.DefaultBrowseDurationMinutes,
+        fmt.Sprintf("浏览时长（分钟），默认 %d 分钟", xiaohongshu.DefaultBrowseDurationMinutes))
+    flag.IntVar(&minScrolls, "min-scrolls", xiaohongshu.DefaultMinScrollsPerRound,
+        fmt.Sprintf("每轮最小滚动次数，默认 %d 次", xiaohongshu.DefaultMinScrollsPerRound))
+    flag.IntVar(&maxScrolls, "max-scrolls", xiaohongshu.DefaultMaxScrollsPerRound,
+        fmt.Sprintf("每轮最大滚动次数，默认 %d 次", xiaohongshu.DefaultMaxScrollsPerRound))
+    flag.IntVar(&clickProbability, "click-probability", xiaohongshu.DefaultClickProbability,
+        fmt.Sprintf("点击笔记的概率(0-100)，默认 %d", xiaohongshu.DefaultClickProbability))
+    flag.IntVar(&interactProbability, "interact-probability", xiaohongshu.DefaultInteractProbability,
+        fmt.Sprintf("在笔记中互动的概率(0-100)，默认 %d", xiaohongshu.DefaultInteractProbability))
+    flag.IntVar(&likeOnlyProbability, "like-only-probability", xiaohongshu.DefaultLikeOnlyProbability,
+        fmt.Sprintf("互动时仅点赞不收藏的概率(0-100)，默认 %d", xiaohongshu.DefaultLikeOnlyProbability))
     flag.IntVar(&instances, "instances", 1, "浏览器实例数量，1 表示单实例，大于 1 表示多实例并行")
     flag.BoolVar(&withoutComment, "without-comment", true, "是否关闭评论，仅点赞/收藏/浏览")
 
@@ -57,11 +62,12 @@ func main() {
 
     // 构建浏览配置
     cfg := xiaohongshu.BrowseConfig{
-        Duration:            duration,
-        MinScrolls:          minScrolls,
-        MaxScrolls:          maxScrolls,
-        ClickProbability:    clickProbability,
-        InteractProbability: interactProbability,
+        Duration:             duration,
+        MinScrolls:           minScrolls,
+        MaxScrolls:           maxScrolls,
+        ClickProbability:     clickProbability,
+        InteractProbability:  interactProbability,
+        LikeOnlyProbability:  likeOnlyProbability,
     }
 
     if withoutComment {
@@ -76,7 +82,7 @@ func main() {
     if instances <= 1 {
         instances = 1
         logrus.Infof("开始单实例浏览推荐页，时长=%d 分钟", duration)
-        results, err := parallelBrowseRecommendationsCLI(ctx, cfg, instances)
+        results, err := recommendation.RunParallelBrowse(ctx, cfg, instances)
         if err != nil {
             logrus.WithError(err).Error("单实例浏览过程中出现错误")
         }
@@ -102,7 +108,7 @@ func main() {
 
     // 多实例并行浏览逻辑
     logrus.Infof("开始并行浏览推荐页，实例数=%d，时长=%d 分钟", instances, duration)
-    results, err := parallelBrowseRecommendationsCLI(ctx, cfg, instances)
+    results, err := recommendation.RunParallelBrowse(ctx, cfg, instances)
     if err != nil {
         logrus.WithError(err).Error("并行浏览过程中出现错误")
     }
@@ -134,145 +140,4 @@ func main() {
     }
 }
 
-
-// ParallelInstanceResult 表示单个浏览器实例的浏览结果（CLI 版本）
-type ParallelInstanceResult struct {
-    InstanceID string                   `json:"instance_id"`
-    Stats      *xiaohongshu.BrowseStats `json:"stats,omitempty"`
-    Error      string                   `json:"error,omitempty"`
-}
-
-// parallelBrowseRecommendationsCLI 使用多个浏览器实例并行浏览推荐页（CLI 版本）
-// 每个实例拥有独立的 cookies 文件和登录会话，登录等待时间统一为 60 秒
-func parallelBrowseRecommendationsCLI(ctx context.Context, config xiaohongshu.BrowseConfig, instances int) ([]*ParallelInstanceResult, error) {
-    if instances <= 0 {
-        instances = 3
-    }
-
-    results := make([]*ParallelInstanceResult, instances)
-    var wg sync.WaitGroup
-
-    // 登录等待窗口：60 秒
-    loginCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-    defer cancel()
-
-    for i := 0; i < instances; i++ {
-        idx := i
-        instanceID := fmt.Sprintf("instance%d", idx+1)
-        results[idx] = &ParallelInstanceResult{InstanceID: instanceID}
-
-        wg.Add(1)
-        go func(res *ParallelInstanceResult) {
-            defer wg.Done()
-
-            cookiePath := cookies.GetInstanceCookiesFilePath(res.InstanceID)
-            logrus.WithFields(logrus.Fields{
-                "instance":     res.InstanceID,
-                "cookies_path": cookiePath,
-            }).Info("启动并行浏览实例 (CLI)")
-
-            // 为当前实例创建独立浏览器
-            b := browser.NewBrowser(configs.IsHeadless(),
-                browser.WithBinPath(configs.GetBinPath()),
-                browser.WithCookiesPath(cookiePath),
-            )
-            page := b.NewPage()
-            defer func() {
-                // 关闭页面和浏览器，避免资源泄漏
-                if page != nil {
-                    page.Close()
-                }
-                if b != nil {
-                    b.Close()
-                }
-            }()
-
-            loginAction := xiaohongshu.NewLogin(page)
-
-            // 1. 先尝试使用已有 cookies 自动登录
-            loggedIn, err := loginAction.CheckLoginStatus(ctx)
-            if err == nil && loggedIn {
-                logrus.WithField("instance", res.InstanceID).Info("检测到已登录，直接开始浏览 (CLI)")
-                browseAction := xiaohongshu.NewBrowseAction(page, config)
-                stats, browseErr := browseAction.StartBrowse(ctx)
-                if browseErr != nil {
-                    res.Error = browseErr.Error()
-                    return
-                }
-                res.Stats = stats
-
-                // 更新 cookies
-                if err := saveCookiesToPath(page, cookiePath); err != nil {
-                    logrus.WithError(err).WithField("instance", res.InstanceID).Warn("保存 cookies 失败 (CLI)")
-                }
-                return
-            }
-
-            // 2. 未登录时，进入登录等待窗口，等待用户扫码登录
-            logrus.WithField("instance", res.InstanceID).Info("未登录，开始等待扫码登录 (CLI)")
-
-            if ok := loginAction.WaitForLogin(loginCtx); !ok {
-                if loginCtx.Err() != nil {
-                    res.Error = "登录等待超时或被取消"
-                } else {
-                    res.Error = "登录失败"
-                }
-                return
-            }
-
-            logrus.WithField("instance", res.InstanceID).Info("扫码登录成功，开始浏览推荐页 (CLI)")
-            // 登录成功后立即保存 cookies
-            if err := saveCookiesToPath(page, cookiePath); err != nil {
-                logrus.WithError(err).WithField("instance", res.InstanceID).Warn("保存 cookies 失败 (CLI)")
-            }
-
-            // 开始浏览推荐页
-            browseAction := xiaohongshu.NewBrowseAction(page, config)
-            stats, browseErr := browseAction.StartBrowse(ctx)
-            if browseErr != nil {
-                res.Error = browseErr.Error()
-                return
-            }
-            res.Stats = stats
-
-            // 浏览完成后再次保存 cookies，保证会话持久化
-            if err := saveCookiesToPath(page, cookiePath); err != nil {
-                logrus.WithError(err).WithField("instance", res.InstanceID).Warn("保存 cookies 失败 (CLI)")
-            }
-        }(results[idx])
-    }
-
-    wg.Wait()
-
-    // 判断是否至少有一个实例成功登录并完成浏览
-    var hasSuccess bool
-    for _, res := range results {
-        if res != nil && res.Stats != nil {
-            hasSuccess = true
-            break
-        }
-    }
-
-    if !hasSuccess {
-        return results, fmt.Errorf("60 秒内没有任何浏览器实例完成登录，任务已终止")
-    }
-
-    return results, nil
-}
-
-// saveCookiesToPath 将当前页面的 cookies 保存到指定文件路径（CLI 版本）
-func saveCookiesToPath(page *rod.Page, cookiePath string) error {
-    cks, err := page.Browser().GetCookies()
-    if err != nil {
-        return err
-    }
-
-    data, err := json.Marshal(cks)
-    if err != nil {
-        return err
-    }
-
-    cookieLoader := cookies.NewLoadCookie(cookiePath)
-    return cookieLoader.SaveCookies(data)
-}
 
