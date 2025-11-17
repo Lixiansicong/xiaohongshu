@@ -291,7 +291,13 @@ func (b *BrowseAction) clickAndViewNote(ctx context.Context, stats *BrowseStats)
 		return fmt.Errorf("笔记信息不完整")
 	}
 
-	logrus.Debugf("步骤3: 选中笔记 ID=%s", feedID)
+	// 基于 NoteCard.Video.Capa.Duration 区分真视频与图文/动图
+	isRealVideo := selectedFeed.NoteCard.IsRealVideo()
+	if isRealVideo && selectedFeed.NoteCard.Video != nil {
+		logrus.Debugf("步骤3: 选中真视频笔记 ID=%s, duration=%ds", feedID, selectedFeed.NoteCard.Video.Capa.Duration)
+	} else {
+		logrus.Debugf("步骤3: 选中图文/动图笔记 ID=%s", feedID)
+	}
 
 	// 步骤4&5: 在可见卡片中查找匹配的笔记
 	selectedCard, err := b.selectCardForFeed(page, selectedFeed)
@@ -306,7 +312,7 @@ func (b *BrowseAction) clickAndViewNote(ctx context.Context, stats *BrowseStats)
 
 	// 步骤8: 浏览笔记内容
 	logrus.Debug("步骤8: 浏览笔记内容")
-	if err := b.browseNoteContent(page); err != nil {
+	if err := b.browseNoteContent(page, isRealVideo); err != nil {
 		logrus.Warnf("浏览笔记内容出错: %v", err)
 	} else {
 		logrus.Debug("笔记内容浏览完成")
@@ -607,22 +613,30 @@ func parseNoteURL(urlStr string) (feedID, xsecToken string) {
 }
 
 // browseNoteContent 浏览笔记内容
-func (b *BrowseAction) browseNoteContent(page *rod.Page) error {
+func (b *BrowseAction) browseNoteContent(page *rod.Page, isRealVideo bool) error {
 	logrus.Debug(">>> 开始浏览笔记内容")
 
 	// 模拟阅读标题和内容
 	logrus.Debug(">>> 阅读标题和内容")
 	time.Sleep(randomDuration(2000, 4000))
 
-	// 随机滚动查看图片或视频
-	scrollTimes := rand.Intn(3) + 1
-	logrus.Debugf(">>> 准备滚动 %d 次查看内容", scrollTimes)
-	for i := 0; i < scrollTimes; i++ {
-		logrus.Debugf(">>> 第 %d 次滚动", i+1)
-		page.Mouse.MustScroll(0, float64(rand.Intn(300)+200))
-		time.Sleep(randomDuration(800, 1500))
+	if isRealVideo {
+		// 真视频：不做图片滚动，只是停留观看视频
+		logrus.Info(">>> 当前笔记为真视频，跳过图片内容滚动，仅停留观看视频")
+		// 为了模拟观看视频的停留时间，额外等待一段时间
+		time.Sleep(randomDuration(2500, 4500))
+	} else {
+		// 图文/动图：保持原有的内容滚动浏览行为
+		logrus.Info(">>> 当前笔记为图文/动图，执行内容滚动浏览")
+		scrollTimes := rand.Intn(3) + 1
+		logrus.Debugf(">>> 准备滚动 %d 次查看内容", scrollTimes)
+		for i := 0; i < scrollTimes; i++ {
+			logrus.Debugf(">>> 第 %d 次滚动", i+1)
+			page.Mouse.MustScroll(0, float64(rand.Intn(300)+200))
+			time.Sleep(randomDuration(800, 1500))
+		}
+		logrus.Debug(">>> 内容滚动完成")
 	}
-	logrus.Debug(">>> 内容滚动完成")
 
 	// 智能浏览评论区（无论视频还是图文，都有概率滚动评论区）
 	if rand.Intn(100) < 70 { // 70% 概率浏览评论区
