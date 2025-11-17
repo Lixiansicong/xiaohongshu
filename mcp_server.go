@@ -73,6 +73,7 @@ type BrowseRecommendationsArgs struct {
 	InteractProbability int      `json:"interact_probability,omitempty" jsonschema:"在笔记中互动的概率(0-100)，默认50%。互动包括点赞、收藏和评论"`
 	EnableComment       *bool    `json:"enable_comment,omitempty" jsonschema:"是否启用评论功能，默认true。如果为false则不会评论"`
 	Comments            []string `json:"comments,omitempty" jsonschema:"评论内容列表（可选）。如果提供则使用提供的内容，否则自动从评论区获取"`
+	Instances           int      `json:"instances,omitempty" jsonschema:"并行浏览时使用的浏览器实例数量，默认3个"`
 }
 
 // InitMCPServer 初始化 MCP Server
@@ -290,7 +291,56 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		},
 	)
 
-	logrus.Infof("Registered %d MCP tools", 12)
+	// 工具 13: 模拟浏览推荐页（不进行评论）
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "browse_recommendations_without_comment",
+			Description: "模拟人类浏览小红书推荐页，包括滚动、随机点击笔记、浏览评论区，并有概率进行点赞、收藏等互动操作，但不会进行评论",
+		},
+		func(ctx context.Context, req *mcp.CallToolRequest, args BrowseRecommendationsArgs) (*mcp.CallToolResult, any, error) {
+			argsMap := map[string]interface{}{
+				"duration":             float64(args.Duration),
+				"min_scrolls":          float64(args.MinScrolls),
+				"max_scrolls":          float64(args.MaxScrolls),
+				"click_probability":    float64(args.ClickProbability),
+				"interact_probability": float64(args.InteractProbability),
+				"comments":             convertStringsToInterfaces(args.Comments),
+				"enable_comment":       false, // 强制禁用评论
+			}
+			result := appServer.handleBrowseRecommendationsWithoutComment(ctx, argsMap)
+			return convertToMCPResult(result), nil, nil
+		},
+	)
+
+	// 工具 14: 并行模拟浏览推荐页（多浏览器实例）
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "parallel_browse_recommendations",
+			Description: "使用多个独立浏览器实例并行模拟人类浏览小红书推荐页，每个实例拥有独立的登录状态和 cookies",
+		},
+		func(ctx context.Context, req *mcp.CallToolRequest, args BrowseRecommendationsArgs) (*mcp.CallToolResult, any, error) {
+			instances := args.Instances
+			if instances <= 0 {
+				instances = 3
+			}
+			argsMap := map[string]interface{}{
+				"duration":             float64(args.Duration),
+				"min_scrolls":          float64(args.MinScrolls),
+				"max_scrolls":          float64(args.MaxScrolls),
+				"click_probability":    float64(args.ClickProbability),
+				"interact_probability": float64(args.InteractProbability),
+				"comments":             convertStringsToInterfaces(args.Comments),
+				"instances":            float64(instances),
+			}
+			if args.EnableComment != nil {
+				argsMap["enable_comment"] = *args.EnableComment
+			}
+			result := appServer.handleParallelBrowseRecommendations(ctx, argsMap)
+			return convertToMCPResult(result), nil, nil
+		},
+	)
+
+	logrus.Infof("Registered %d MCP tools", 14)
 }
 
 // convertToMCPResult 将自定义的 MCPToolResult 转换为官方 SDK 的格式

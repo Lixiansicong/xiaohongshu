@@ -404,16 +404,16 @@ func (s *AppServer) handleLikeFeed(ctx context.Context, args map[string]interfac
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作失败: 缺少xsec_token参数"}}, IsError: true}
 	}
 	unlike, _ := args["unlike"].(bool)
-	
+
 	var res *ActionResult
 	var err error
-	
+
 	if unlike {
 		res, err = s.xiaohongshuService.UnlikeFeed(ctx, feedID, xsecToken)
 	} else {
 		res, err = s.xiaohongshuService.LikeFeed(ctx, feedID, xsecToken)
 	}
-	
+
 	if err != nil {
 		action := "点赞"
 		if unlike {
@@ -421,7 +421,7 @@ func (s *AppServer) handleLikeFeed(ctx context.Context, args map[string]interfac
 		}
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: action + "失败: " + err.Error()}}, IsError: true}
 	}
-	
+
 	action := "点赞"
 	if unlike {
 		action = "取消点赞"
@@ -440,16 +440,16 @@ func (s *AppServer) handleFavoriteFeed(ctx context.Context, args map[string]inte
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "操作失败: 缺少xsec_token参数"}}, IsError: true}
 	}
 	unfavorite, _ := args["unfavorite"].(bool)
-	
+
 	var res *ActionResult
 	var err error
-	
+
 	if unfavorite {
 		res, err = s.xiaohongshuService.UnfavoriteFeed(ctx, feedID, xsecToken)
 	} else {
 		res, err = s.xiaohongshuService.FavoriteFeed(ctx, feedID, xsecToken)
 	}
-	
+
 	if err != nil {
 		action := "收藏"
 		if unfavorite {
@@ -457,7 +457,7 @@ func (s *AppServer) handleFavoriteFeed(ctx context.Context, args map[string]inte
 		}
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: action + "失败: " + err.Error()}}, IsError: true}
 	}
-	
+
 	action := "收藏"
 	if unfavorite {
 		action = "取消收藏"
@@ -537,7 +537,7 @@ func (s *AppServer) handleBrowseRecommendations(ctx context.Context, args map[st
 	maxScrolls, _ := args["max_scrolls"].(float64)
 	clickProbability, _ := args["click_probability"].(float64)
 	interactProbability, _ := args["interact_probability"].(float64)
-	
+
 	var comments []string
 	if commentsInterface, ok := args["comments"].([]interface{}); ok {
 		for _, c := range commentsInterface {
@@ -546,7 +546,7 @@ func (s *AppServer) handleBrowseRecommendations(ctx context.Context, args map[st
 			}
 		}
 	}
-	
+
 	// 解析 enable_comment 参数
 	var enableComment *bool
 	if enableCommentVal, ok := args["enable_comment"].(bool); ok {
@@ -564,7 +564,7 @@ func (s *AppServer) handleBrowseRecommendations(ctx context.Context, args map[st
 		Comments:            comments,
 	}
 
-	logrus.Infof("MCP: 浏览配置 - 时长: %d分钟, 点击概率: %d%%, 互动概率: %d%%", 
+	logrus.Infof("MCP: 浏览配置 - 时长: %d分钟, 点击概率: %d%%, 互动概率: %d%%",
 		config.Duration, config.ClickProbability, config.InteractProbability)
 
 	// 执行浏览
@@ -587,7 +587,7 @@ func (s *AppServer) handleBrowseRecommendations(ctx context.Context, args map[st
 - 滚动次数: %d
 - 点击笔记: %d 个
 - 点赞: %d 次
-- 收藏: %d 次  
+- 收藏: %d 次
 - 评论: %d 次
 - 浏览笔记: %d 个`,
 		stats.Duration.Round(time.Second),
@@ -606,3 +606,182 @@ func (s *AppServer) handleBrowseRecommendations(ctx context.Context, args map[st
 		}},
 	}
 }
+
+// handleBrowseRecommendationsWithoutComment 处理浏览推荐页（不进行评论）
+func (s *AppServer) handleBrowseRecommendationsWithoutComment(ctx context.Context, args map[string]interface{}) *MCPToolResult {
+	logrus.Info("MCP: 开始浏览推荐页（无评论模式）")
+
+	// 解析参数
+	duration, _ := args["duration"].(float64)
+	minScrolls, _ := args["min_scrolls"].(float64)
+	maxScrolls, _ := args["max_scrolls"].(float64)
+	clickProbability, _ := args["click_probability"].(float64)
+	interactProbability, _ := args["interact_probability"].(float64)
+
+	var comments []string
+	if commentsInterface, ok := args["comments"].([]interface{}); ok {
+		for _, c := range commentsInterface {
+			if commentStr, ok := c.(string); ok {
+				comments = append(comments, commentStr)
+			}
+		}
+	}
+
+	// 构建配置（强制禁用评论）
+	config := xiaohongshu.BrowseConfig{
+		Duration:            int(duration),
+		MinScrolls:          int(minScrolls),
+		MaxScrolls:          int(maxScrolls),
+		ClickProbability:    int(clickProbability),
+		InteractProbability: int(interactProbability),
+		EnableComment:       func() *bool { b := false; return &b }(), // 强制禁用评论
+		Comments:            comments,
+	}
+
+	logrus.Infof("MCP: 无评论浏览配置 - 时长: %d分钟, 点击概率: %d%%, 互动概率: %d%%",
+		config.Duration, config.ClickProbability, config.InteractProbability)
+
+	// 执行浏览
+	stats, err := s.xiaohongshuService.BrowseRecommendationsWithoutComment(ctx, config)
+	if err != nil {
+		return &MCPToolResult{
+			Content: []MCPContent{{
+				Type: "text",
+				Text: "浏览推荐页失败: " + err.Error(),
+			}},
+			IsError: true,
+		}
+	}
+
+	// 格式化输出
+	resultText := fmt.Sprintf(`浏览推荐页完成（无评论模式）！
+
+📊 统计信息:
+- 浏览时长: %v
+- 滚动次数: %d
+- 点击笔记: %d 个
+- 点赞: %d 次
+- 收藏: %d 次
+- 评论: %d 次
+- 浏览笔记: %d 个`,
+		stats.Duration.Round(time.Second),
+		stats.ScrollCount,
+		stats.ClickCount,
+		stats.LikeCount,
+		stats.FavoriteCount,
+		stats.CommentCount,
+		len(stats.ViewedNotes),
+	)
+
+	return &MCPToolResult{
+		Content: []MCPContent{{
+			Type: "text",
+			Text: resultText,
+		}},
+	}
+}
+
+// handleParallelBrowseRecommendations 处理并行浏览推荐页（多浏览器实例）
+func (s *AppServer) handleParallelBrowseRecommendations(ctx context.Context, args map[string]interface{}) *MCPToolResult {
+	logrus.Info("MCP: 开始并行浏览推荐页（多实例）")
+
+	// 解析参数
+	duration, _ := args["duration"].(float64)
+	minScrolls, _ := args["min_scrolls"].(float64)
+	maxScrolls, _ := args["max_scrolls"].(float64)
+	clickProbability, _ := args["click_probability"].(float64)
+	interactProbability, _ := args["interact_probability"].(float64)
+
+	var comments []string
+	if commentsInterface, ok := args["comments"].([]interface{}); ok {
+		for _, c := range commentsInterface {
+			if commentStr, ok := c.(string); ok {
+				comments = append(comments, commentStr)
+			}
+		}
+	}
+
+	// 解析 enable_comment 参数
+	var enableComment *bool
+	if enableCommentVal, ok := args["enable_comment"].(bool); ok {
+		enableComment = &enableCommentVal
+	}
+
+	// 并行实例数量
+	instancesFloat, _ := args["instances"].(float64)
+	instances := int(instancesFloat)
+	if instances <= 0 {
+		instances = 3
+	}
+
+	// 构建配置
+	config := xiaohongshu.BrowseConfig{
+		Duration:            int(duration),
+		MinScrolls:          int(minScrolls),
+		MaxScrolls:          int(maxScrolls),
+		ClickProbability:    int(clickProbability),
+		InteractProbability: int(interactProbability),
+		EnableComment:       enableComment,
+		Comments:            comments,
+	}
+
+	logrus.Infof("MCP: 并行浏览配置 - 实例数: %d, 时长: %d分钟, 点击概率: %d%%, 互动概率: %d%%",
+		instances, config.Duration, config.ClickProbability, config.InteractProbability)
+
+	// 执行并行浏览
+	results, err := s.xiaohongshuService.ParallelBrowseRecommendations(ctx, config, instances)
+	if err != nil {
+		logrus.WithError(err).Error("并行浏览推荐页失败")
+	}
+
+	var sb strings.Builder
+	sb.WriteString("并行浏览推荐页完成。\n\n")
+	sb.WriteString(fmt.Sprintf("配置: 实例数=%d, 时长=%d分钟, 点击概率=%d%%, 互动概率=%d%%\n\n",
+		instances, config.Duration, config.ClickProbability, config.InteractProbability))
+
+	for _, res := range results {
+		if res == nil {
+			continue
+		}
+		if res.Stats != nil {
+			stats := res.Stats
+			sb.WriteString(fmt.Sprintf(
+				"实例 %s:\n- 浏览时长: %v\n- 滚动次数: %d\n- 点击笔记: %d 个\n- 点赞: %d 次\n- 收藏: %d 次\n- 评论: %d 次\n- 浏览笔记: %d 个\n\n",
+				res.InstanceID,
+				stats.Duration.Round(time.Second),
+				stats.ScrollCount,
+				stats.ClickCount,
+				stats.LikeCount,
+				stats.FavoriteCount,
+				stats.CommentCount,
+				len(stats.ViewedNotes),
+			))
+		} else {
+			sb.WriteString(fmt.Sprintf("实例 %s: 失败 - %s\n\n", res.InstanceID, res.Error))
+		}
+	}
+
+	// 如果所有实例都失败了，将整体标记为错误
+	isError := err != nil
+	if !isError {
+		allFailed := true
+		for _, res := range results {
+			if res != nil && res.Stats != nil {
+				allFailed = false
+				break
+			}
+		}
+		if allFailed {
+			isError = true
+		}
+	}
+
+	return &MCPToolResult{
+		Content: []MCPContent{{
+			Type: "text",
+			Text: sb.String(),
+		}},
+		IsError: isError,
+	}
+}
+

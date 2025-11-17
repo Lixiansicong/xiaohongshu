@@ -55,16 +55,16 @@ func NewBrowseAction(page *rod.Page, config BrowseConfig) *BrowseAction {
 		config.Duration = 10 // 默认浏览10分钟
 	}
 	if config.MinScrolls == 0 {
-		config.MinScrolls = 3
+		config.MinScrolls = 2 // 减少最小滚动次数，避免过度滚动
 	}
 	if config.MaxScrolls == 0 {
-		config.MaxScrolls = 8
+		config.MaxScrolls = 5 // 减少最大滚动次数，使浏览更自然
 	}
 	if config.ClickProbability == 0 {
-		config.ClickProbability = 30 // 默认30%概率点击笔记
+		config.ClickProbability = 70 // 降低点击概率，减少频繁点击
 	}
 	if config.InteractProbability == 0 {
-		config.InteractProbability = 50 // 默认50%概率互动
+		config.InteractProbability = 60 // 降低互动概率，使行为更自然
 	}
 
 	return &BrowseAction{
@@ -154,8 +154,8 @@ func (b *BrowseAction) browseRound(ctx context.Context, stats *BrowseStats) erro
 		}
 		stats.ScrollCount++
 
-		// 停留时间：中位数 3-6s
-		time.Sleep(randomDuration(3000, 6000))
+		// 停留时间：中位数 2-4s（减少停留时间，使浏览更自然）
+		time.Sleep(randomDuration(2000, 4000))
 
 		// 根据概率决定是否点击笔记
 		if rand.Intn(100) < b.config.ClickProbability {
@@ -212,8 +212,8 @@ func (b *BrowseAction) humanLikeScrollWithBacktrack(page *rod.Page) error {
 	// 随机选择滚动方式
 	scrollType := rand.Intn(3)
 	
-    // 主滚动动作
-    scrollAmount := rand.Intn(900) + 700 // 700-1600像素（加长）
+    // 主滚动动作 - 减少滚动距离，使浏览更自然
+    scrollAmount := rand.Intn(500) + 400 // 400-900像素（减少滚动幅度）
 	
 	switch scrollType {
 	case 0:
@@ -233,7 +233,7 @@ func (b *BrowseAction) humanLikeScrollWithBacktrack(page *rod.Page) error {
 
 	case 1:
 		// 使用键盘方向键
-		times := rand.Intn(4) + 2 // 2-5次
+		times := rand.Intn(3) + 1 // 1-3次（减少滚动次数）
 		for i := 0; i < times; i++ {
 			page.MustElement("body").MustKeyActions().Press(input.ArrowDown).MustDo()
 			// 插入短暂停：0.2-1.2s
@@ -600,14 +600,62 @@ func (b *BrowseAction) browseNoteContent(page *rod.Page) error {
 	return nil
 }
 
+// isCommentAreaVisible 检查评论区是否在视口中可见
+func (b *BrowseAction) isCommentAreaVisible(page *rod.Page) (bool, error) {
+	isVisible := page.MustEval(`() => {
+		// 尝试多种评论区选择器
+		const commentSelectors = [
+			'.comment-container',
+			'[class*="comment"]',
+			'.comments-section',
+			'.note-comments'
+		];
+		
+		for (let selector of commentSelectors) {
+			const commentArea = document.querySelector(selector);
+			if (commentArea) {
+				// 获取元素的位置信息
+				const rect = commentArea.getBoundingClientRect();
+				
+				// 检查元素是否在视口中
+				// 考虑到小红书的弹窗结构，我们需要检查相对于弹窗容器的位置
+				const modal = document.querySelector('.note-detail-modal') || 
+				              document.querySelector('.modal') || 
+				              document.querySelector('[class*="detail"]');
+				
+				if (modal) {
+					const modalRect = modal.getBoundingClientRect();
+					// 检查评论区是否在弹窗的可见区域内
+					const isVisibleInModal = rect.top >= modalRect.top && 
+					                       rect.bottom <= modalRect.bottom &&
+					                       rect.height > 0;
+					
+					if (isVisibleInModal) {
+						return true;
+					}
+				} else {
+					// 如果找不到弹窗，使用全局视口检查
+					const isVisible = rect.top >= 0 && 
+					                 rect.bottom <= window.innerHeight &&
+					                 rect.height > 0;
+					
+					if (isVisible) {
+						return true;
+					}
+				}
+			}
+		}
+		
+		return false;
+	}`).Bool()
+
+	return isVisible, nil
+}
+
 // scrollCommentArea 智能滚动评论区
 // 自动检测评论区是否有评论，以及是否到达底部
 func (b *BrowseAction) scrollCommentArea(page *rod.Page) error {
 	logrus.Info("开始浏览评论区")
-
-	// 先滚动到评论区位置
-	page.Mouse.MustScroll(0, float64(rand.Intn(400)+300))
-	time.Sleep(randomDuration(1000, 2000))
 
 	// 检查评论区是否有评论
 	hasComments, err := b.hasComments(page)
@@ -619,6 +667,55 @@ func (b *BrowseAction) scrollCommentArea(page *rod.Page) error {
 	if !hasComments {
 		logrus.Info("评论区没有评论，跳过滚动")
 		return nil
+	}
+
+	// 检查评论区是否在视口中可见
+	commentVisible, err := b.isCommentAreaVisible(page)
+	if err != nil {
+		logrus.Warnf("检查评论区可见性失败: %v", err)
+		// 如果无法检查可见性，继续执行原有逻辑
+		commentVisible = false
+	}
+
+	// 如果评论区不可见，先滚动到评论区位置
+	if !commentVisible {
+		logrus.Info("评论区不在视口中，先滚动到评论区位置")
+		
+		// 尝试找到评论区并滚动到其位置
+		scrolledToComment := page.MustEval(`() => {
+			// 尝试多种评论区选择器
+			const commentSelectors = [
+				'.comment-container',
+				'[class*="comment"]',
+				'.comments-section',
+				'.note-comments'
+			];
+			
+			for (let selector of commentSelectors) {
+				const commentArea = document.querySelector(selector);
+				if (commentArea) {
+					// 滚动到评论区位置
+					commentArea.scrollIntoView({ behavior: 'smooth', block: 'start' });
+					return true;
+				}
+			}
+			
+			// 如果找不到评论区，尝试向下滚动一定距离
+			window.scrollBy({ top: 400, behavior: 'smooth' });
+			return false;
+		}`).Bool()
+		
+		// 等待滚动完成
+		time.Sleep(randomDuration(1500, 2500))
+		
+		if !scrolledToComment {
+			logrus.Warn("无法精确定位评论区，使用通用滚动")
+			// 降级方案：通用滚动
+			page.Mouse.MustScroll(0, float64(rand.Intn(400)+300))
+			time.Sleep(randomDuration(1000, 2000))
+		}
+	} else {
+		logrus.Info("评论区已在视口中可见")
 	}
 
 	logrus.Info("评论区有评论，开始滚动")

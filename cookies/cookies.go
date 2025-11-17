@@ -1,8 +1,10 @@
 package cookies
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/pkg/errors"
 )
@@ -39,7 +41,26 @@ func (c *localCookie) LoadCookies() ([]byte, error) {
 
 // SaveCookies 保存 cookies 到文件中。
 func (c *localCookie) SaveCookies(data []byte) error {
-	return os.WriteFile(c.path, data, 0644)
+	return os.WriteFile(c.path, data, 0600)
+}
+
+// GetInstanceCookiesFilePath 返回指定实例的 cookies 文件路径，形如
+// "cookies_instance1.json"。如果设置了 COOKIES_PATH，则在其基础上派生。
+func GetInstanceCookiesFilePath(instance string) string {
+	basePath := GetCookiesFilePath()
+	if instance == "" {
+		return basePath
+	}
+
+	dir := filepath.Dir(basePath)
+	base := filepath.Base(basePath)
+	ext := filepath.Ext(base)
+	name := strings.TrimSuffix(base, ext)
+	if name == "" {
+		name = "cookies"
+	}
+
+	return filepath.Join(dir, fmt.Sprintf("%s_%s%s", name, instance, ext))
 }
 
 // GetCookiesFilePath 获取 cookies 文件路径。
