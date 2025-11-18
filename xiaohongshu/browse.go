@@ -291,13 +291,8 @@ func (b *BrowseAction) clickAndViewNote(ctx context.Context, stats *BrowseStats)
 		return fmt.Errorf("笔记信息不完整")
 	}
 
-	// 基于 NoteCard.Video.Capa.Duration 区分真视频与图文/动图
-	isRealVideo := selectedFeed.NoteCard.IsRealVideo()
-	if isRealVideo && selectedFeed.NoteCard.Video != nil {
-		logrus.Debugf("步骤3: 选中真视频笔记 ID=%s, duration=%ds", feedID, selectedFeed.NoteCard.Video.Capa.Duration)
-	} else {
-		logrus.Debugf("步骤3: 选中图文/动图笔记 ID=%s", feedID)
-	}
+	// 步骤3: 记录选中笔记的基础信息（暂不在此阶段区分真视频/图文）
+	logrus.Debugf("步骤3: 选中笔记 ID=%s, type=%s", feedID, selectedFeed.NoteCard.Type)
 
 	// 步骤4&5: 在可见卡片中查找匹配的笔记
 	selectedCard, err := b.selectCardForFeed(page, selectedFeed)
@@ -305,14 +300,21 @@ func (b *BrowseAction) clickAndViewNote(ctx context.Context, stats *BrowseStats)
 		return err
 	}
 
-	// 步骤6&7: 点击进入笔记并等待页面加载
-	if err := b.openNoteFromCard(page, selectedCard, feedID, stats); err != nil {
+	// 步骤6&7: 点击进入笔记并等待页面加载（基于加载耗时检测是否为真视频）
+	isRealVideo, err := b.openNoteFromCard(page, selectedCard, feedID, stats)
+	if err != nil {
 		return err
+	}
+
+	if isRealVideo {
+		logrus.Info("步骤7判定当前笔记为真视频，将采用视频浏览策略")
+	} else {
+		logrus.Info("步骤7判定当前笔记为图文/动图，将采用图文浏览策略")
 	}
 
 	// 步骤8: 浏览笔记内容
 	logrus.Debug("步骤8: 浏览笔记内容")
-	if err := b.browseNoteContent(page, isRealVideo); err != nil {
+	if err := b.browseNoteContent(page, feedID, isRealVideo); err != nil {
 		logrus.Warnf("浏览笔记内容出错: %v", err)
 	} else {
 		logrus.Debug("笔记内容浏览完成")
@@ -429,13 +431,13 @@ func (b *BrowseAction) selectCardForFeed(page *rod.Page, selectedFeed Feed) (*ro
 	return selectedCard, nil
 }
 
-// openNoteFromCard 点击笔记卡片并等待笔记页面加载完成
-func (b *BrowseAction) openNoteFromCard(page *rod.Page, selectedCard *rod.Element, feedID string, stats *BrowseStats) error {
+// openNoteFromCard 点击笔记卡片并等待笔记页面加载（同时基于加载耗时检测是否为真视频）
+func (b *BrowseAction) openNoteFromCard(page *rod.Page, selectedCard *rod.Element, feedID string, stats *BrowseStats) (bool, error) {
 	// 点击进入笔记
 	logrus.Info("步骤6: 点击笔记卡片")
 	if err := selectedCard.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		logrus.Errorf("点击笔记失败: %v", err)
-		return fmt.Errorf("点击笔记失败: %v", err)
+		return false, fmt.Errorf("点击笔记失败: %v", err)
 	}
 	logrus.Info("笔记点击成功")
 	stats.ClickCount++
@@ -444,14 +446,38 @@ func (b *BrowseAction) openNoteFromCard(page *rod.Page, selectedCard *rod.Elemen
 		stats.viewedSet[feedID] = struct{}{}
 	}
 
-	// 等待笔记页面加载
+	// 步骤7: 等待笔记页面加载，并基于加载耗时检测是否为真视频
 	logrus.Info("步骤7: 等待笔记页面加载")
-	time.Sleep(randomDuration(1500, 3000))
-	logrus.Debug("开始等待DOM稳定")
-	page.MustWaitDOMStable()
-	logrus.Info("笔记页面加载完成")
+	stepStart := time.Now()
 
-	return nil
+	// 先进行一个短暂的固定等待，模拟首屏渲染
+	time.Sleep(randomDuration(1500, 3000))
+
+	maxWait := 4 * time.Second
+	logrus.Debug("开始等待DOM稳定（最多 4 秒用于区分视频/图文）")
+	waitStart := time.Now()
+
+	var isRealVideo bool
+
+	err := rod.Try(func() {
+		page.Timeout(maxWait).MustWaitDOMStable()
+	})
+	elapsedWait := time.Since(waitStart)
+
+	if err != nil {
+		// 在 4 秒内仍未完成 => 判定为真视频
+		isRealVideo = true
+		logrus.Infof("笔记页面在 %v 内未完全加载，判定为真视频笔记", elapsedWait)
+	} else {
+		// 4 秒内加载完成 => 视为图文/动图
+		isRealVideo = false
+		logrus.Info("笔记页面加载完成")
+		logrus.Debugf("笔记页面加载耗时: %v", elapsedWait)
+	}
+
+	logrus.Debugf("步骤7 总等待时间（含初始等待）: %v", time.Since(stepStart))
+
+	return isRealVideo, nil
 }
 
 
@@ -612,30 +638,56 @@ func parseNoteURL(urlStr string) (feedID, xsecToken string) {
 	return feedID, xsecToken
 }
 
-// browseNoteContent 浏览笔记内容
-func (b *BrowseAction) browseNoteContent(page *rod.Page, isRealVideo bool) error {
+// browseNoteContent 浏览笔记内容（视频与图文策略不同）
+func (b *BrowseAction) browseNoteContent(page *rod.Page, feedID string, isRealVideo bool) error {
 	logrus.Debug(">>> 开始浏览笔记内容")
 
-	// 模拟阅读标题和内容
+	// 模拟先看标题和文案
 	logrus.Debug(">>> 阅读标题和内容")
 	time.Sleep(randomDuration(2000, 4000))
 
 	if isRealVideo {
-		// 真视频：不做图片滚动，只是停留观看视频
-		logrus.Info(">>> 当前笔记为真视频，跳过图片内容滚动，仅停留观看视频")
-		// 为了模拟观看视频的停留时间，额外等待一段时间
-		time.Sleep(randomDuration(2500, 4500))
+		// 真视频：不做图片滚动，采用“完整观看/部分观看”策略
+		if rand.Intn(100) < 10 {
+			logrus.Info(">>> 当前笔记为真视频，本次选择完整观看视频，等待视频播放完成")
+			start := time.Now()
+			page.MustWaitDOMStable()
+			watchCost := time.Since(start)
+			logrus.Infof(">>> 视频完整观看结束，等待约 %.1f 秒", watchCost.Seconds())
+		} else {
+			// 90% 概率部分观看：停留 4-9 秒后进入后续操作
+			watchDuration := randomDuration(4000, 9000)
+			logrus.Infof(">>> 当前笔记为真视频，本次选择部分观看，停留约 %d 秒后进入后续操作", int(watchDuration.Seconds()))
+			time.Sleep(watchDuration)
+		}
 	} else {
-		// 图文/动图：保持原有的内容滚动浏览行为
-		logrus.Info(">>> 当前笔记为图文/动图，执行内容滚动浏览")
-		scrollTimes := rand.Intn(3) + 1
-		logrus.Debugf(">>> 准备滚动 %d 次查看内容", scrollTimes)
+		// 图文/动图：先浏览图片，再轻微滚动正文
+		logrus.Info(">>> 当前笔记为图文/动图，准备浏览图片和正文内容")
+
+		imageCount, err := b.getNoteImageCount(page, feedID)
+		if err != nil {
+			logrus.Warnf(">>> 获取图片数量失败（可忽略）: %v", err)
+		} else if imageCount > 0 {
+			logrus.Infof(">>> 检测到该笔记共有 %d 张图片", imageCount)
+
+			// 80% 概率执行图片轮播浏览
+			if rand.Intn(100) < 80 {
+				if err := b.browseNoteImages(page, imageCount); err != nil {
+					logrus.Warnf(">>> 浏览轮播图片失败: %v", err)
+				}
+			}
+		} else {
+			logrus.Debug(">>> 未检测到图片列表，跳过图片浏览")
+		}
+
+		// 最后保留 1-2 次正文滚动，模拟浏览文案
+		scrollTimes := rand.Intn(2) + 1
+		logrus.Debugf(">>> 准备滚动 %d 次查看正文内容", scrollTimes)
 		for i := 0; i < scrollTimes; i++ {
-			logrus.Debugf(">>> 第 %d 次滚动", i+1)
-			page.Mouse.MustScroll(0, float64(rand.Intn(300)+200))
+			page.Mouse.MustScroll(0, float64(rand.Intn(250)+150))
 			time.Sleep(randomDuration(800, 1500))
 		}
-		logrus.Debug(">>> 内容滚动完成")
+		logrus.Debug(">>> 正文内容滚动完成")
 	}
 
 	// 智能浏览评论区（无论视频还是图文，都有概率滚动评论区）
@@ -652,6 +704,106 @@ func (b *BrowseAction) browseNoteContent(page *rod.Page, isRealVideo bool) error
 
 	logrus.Info(">>> 笔记内容浏览完毕")
 	return nil
+}
+
+// browseNoteImages 基于轮播组件结构模拟依次查看图片，通过点击轮播箭头切换
+func (b *BrowseAction) browseNoteImages(page *rod.Page, imageCount int) error {
+	if imageCount <= 1 {
+		logrus.Debug(">>> 仅检测到 1 张图片，停留浏览")
+		time.Sleep(randomDuration(1500, 3000))
+		return nil
+	}
+
+	logrus.Debugf(">>> 开始浏览轮播图片，总数=%d", imageCount)
+
+	// 绝大多数情况下完整浏览所有图片，少数情况只看前几张，避免过于规律
+	total := imageCount
+	if imageCount > 2 && rand.Intn(100) < 30 {
+		total = rand.Intn(imageCount-1) + 1
+	}
+
+	// 尝试找到轮播图右侧的箭头按钮
+	rightArrow, err := page.Element(".slider-container .arrow-controller.right")
+	if err != nil || rightArrow == nil {
+		logrus.Warn(">>> 未找到轮播图右侧箭头，改为停留等待浏览")
+		time.Sleep(randomDuration(1500, 3000))
+		return nil
+	}
+
+	// 当前图片先停留一段时间
+	time.Sleep(randomDuration(1000, 3000))
+
+	for i := 1; i < total; i++ {
+		// 模拟用户在当前图片上停留一段时间再切下一张
+		time.Sleep(randomDuration(1000, 3000))
+
+		if err := rod.Try(func() {
+			rightArrow.MustClick()
+		}); err != nil {
+			logrus.Warnf(">>> 点击轮播图下一张失败，提前结束轮播浏览: %v", err)
+			break
+		}
+	}
+
+	return nil
+}
+
+
+// getNoteImageCount 仅通过笔记详情中的轮播组件 DOM 结构获取当前笔记的图片张数
+func (b *BrowseAction) getNoteImageCount(page *rod.Page, _ string) (int, error) {
+	count := page.MustEval(`() => {
+		try {
+			const sliderRoot = document.querySelector('.slider-container .note-slider') ||
+					document.querySelector('.note-slider');
+			if (!sliderRoot) return 0;
+
+			// 1. 优先从 fraction 文本中解析总张数，例如 "5/6" => 6
+			const fractionEl = sliderRoot.parentElement && sliderRoot.parentElement.querySelector('.fraction');
+			if (fractionEl && fractionEl.textContent) {
+				const text = fractionEl.textContent.trim();
+				const m = text.match(/^\s*\d+\s*\/\s*(\d+)\s*$/);
+				if (m) {
+					const total = parseInt(m[1], 10);
+					if (!Number.isNaN(total) && total > 0) {
+						return total;
+					}
+				}
+			}
+
+			// 2. 退回到基于 .swiper-slide 结构的统计方式
+			const wrapper = sliderRoot.querySelector('.swiper-wrapper');
+			if (!wrapper) return 0;
+
+			const slides = Array.from(wrapper.querySelectorAll('.swiper-slide'));
+			if (!slides.length) return 0;
+
+			const indexSet = new Set();
+			for (const slide of slides) {
+				// 跳过 swiper 复制出来的 slide
+				if (slide.classList.contains('swiper-slide-duplicate')) continue;
+				const idx = slide.getAttribute('data-index') || slide.getAttribute('data-swiper-slide-index');
+				if (idx != null) indexSet.add(idx);
+			}
+			if (indexSet.size > 0) {
+				return indexSet.size;
+			}
+
+			// 如果没有 index，就直接按“非 duplicate slide 数量”统计
+			const filtered = slides.filter(s => !s.classList.contains('swiper-slide-duplicate'));
+			if (filtered.length > 0) {
+				return filtered.length;
+			}
+
+			return 0;
+		} catch (e) {
+			return 0;
+		}
+	}`).Int()
+
+	if count == 0 {
+		return 0, fmt.Errorf("未在 DOM 中发现轮播图组件或有效的图片")
+	}
+	return count, nil
 }
 
 // isCommentAreaVisible 检查评论区是否在视口中可见

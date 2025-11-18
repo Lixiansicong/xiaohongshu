@@ -36,18 +36,6 @@ type NoteCard struct {
 	Video        *Video       `json:"video,omitempty"` // 视频内容，可能为空
 }
 
-// IsRealVideo 判断当前 NoteCard 是否为“真视频”（区分动图/图文）
-// 规则：
-// - Video 为空 => 不是视频
-// - Video.Capa.Duration 的单位为秒，若时长 > 2.5 秒视为真视频
-//   因字段为 int，这里采用 >2 作为阈值（即 >=3 秒）
-func (n NoteCard) IsRealVideo() bool {
-	if n.Video == nil {
-		return false
-	}
-	return n.Video.Capa.Duration > 2
-}
-
 
 // User 表示用户信息
 type User struct {
