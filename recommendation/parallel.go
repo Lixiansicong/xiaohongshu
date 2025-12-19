@@ -45,6 +45,14 @@ func RunParallelBrowse(ctx context.Context, config xiaohongshu.BrowseConfig, ins
         go func(res *ParallelInstanceResult) {
             defer wg.Done()
 
+            // 添加 panic 恢复，防止单个实例崩溃导致整个程序退出
+            defer func() {
+                if r := recover(); r != nil {
+                    logrus.WithField("instance", res.InstanceID).Errorf("panic recovered: %v", r)
+                    res.Error = fmt.Sprintf("panic: %v", r)
+                }
+            }()
+
             cookiePath := cookies.GetInstanceCookiesFilePath(res.InstanceID)
             logrus.WithFields(logrus.Fields{
                 "instance":     res.InstanceID,
@@ -57,6 +65,10 @@ func RunParallelBrowse(ctx context.Context, config xiaohongshu.BrowseConfig, ins
                 browser.WithCookiesPath(cookiePath),
             )
             page := b.NewPage()
+
+            // 配置页面（应用 UA 修复等）
+            browser.ConfigurePage(page)
+
             defer func() {
                 // 关闭页面和浏览器，避免资源泄漏
                 if page != nil {

@@ -2,8 +2,10 @@ package browser
 
 import (
 	"sync"
+	// "runtime"
 
 	"github.com/go-rod/rod"
+	// "github.com/go-rod/rod/lib/proto"
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/headless_browser"
 )
@@ -95,6 +97,9 @@ func (m *Manager) NewPageWithRelease() (*rod.Page, func()) {
 	browser, releaseBrowser := m.AcquireBrowser()
 	
 	page := browser.NewPage()
+	
+	// 配置页面（应用 UA 修复等）
+	ConfigurePage(page)
 	
 	// 组合释放函数：先关闭页面，再释放浏览器
 	release := func() {
