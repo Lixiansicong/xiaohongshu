@@ -65,10 +65,12 @@ type BrowseAction struct {
 
 type tenTimesManager struct {
 	instanceID string
+	forceAll   bool
 	targets    map[string]struct{}
 	completed  map[string]struct{}
 	state      map[string]*tenNoteState
 	active     *tenTask
+	activeNotVisible int
 	queue      []*tenTask
 	enqueued   map[string]struct{}
 
@@ -179,6 +181,14 @@ func (b *BrowseAction) StartBrowse(ctx context.Context) (*BrowseStats, error) {
 		default:
 			// 检查是否到了刷新时间
 			if time.Now().After(nextRefreshTime) {
+				if b.ten != nil && (b.ten.active != nil || len(b.ten.queue) > 0) {
+					delaySeconds := rand.Intn(31) + 30 // 30-60s
+					nextRefreshTime = time.Now().Add(time.Duration(delaySeconds) * time.Second)
+					logrus.WithFields(logrus.Fields{
+						"instance": b.config.InstanceID,
+						"delay_s":  delaySeconds,
+					}).Info("ten-times 任务进行中，延后刷新推荐页")
+				} else {
 				logrus.Info("刷新推荐页以获取新内容")
 				// 为刷新操作创建一个独立的超时 context
 				refreshCtx, refreshCancel := context.WithTimeout(ctx, 60*time.Second)
@@ -194,6 +204,7 @@ func (b *BrowseAction) StartBrowse(ctx context.Context) (*BrowseStats, error) {
 				if remainingMinutes > 0 {
 					logrus.Infof("页面已刷新，计划在 %.1f 分钟后再次刷新（剩余浏览时间: %.1f 分钟）",
 						time.Until(nextRefreshTime).Minutes(), remainingMinutes)
+				}
 				}
 			}
 
@@ -221,6 +232,16 @@ func (b *BrowseAction) browseRound(ctx context.Context, stats *BrowseStats) erro
 	scrollCount := rand.Intn(b.config.MaxScrolls-b.config.MinScrolls+1) + b.config.MinScrolls
 
 	for i := 0; i < scrollCount; i++ {
+		if b.ten != nil {
+			processed, err := b.processTenTimesIfNeeded(ctx, stats)
+			if err != nil {
+				logrus.WithError(err).WithField("instance", b.config.InstanceID).Warn("ten-times 处理异常，继续正常浏览")
+			} else if processed {
+				pause(700, 1100)
+				continue
+			}
+		}
+
 		// 模拟人类滚动（包含回滚机制）
 		if err := b.humanLikeScrollWithBacktrack(page); err != nil {
 			return err
@@ -235,6 +256,7 @@ func (b *BrowseAction) browseRound(ctx context.Context, stats *BrowseStats) erro
 			if err != nil {
 				logrus.WithError(err).WithField("instance", b.config.InstanceID).Warn("ten-times 处理异常，继续正常浏览")
 			} else if processed {
+				pause(700, 1100)
 				continue
 			}
 		}
@@ -265,12 +287,24 @@ func (b *BrowseAction) processTenTimesIfNeeded(ctx context.Context, stats *Brows
 	page := b.page.Context(ctx)
 
 	if b.ten.active != nil {
-		_, done, err := b.executeTenInteractionStep(ctx, stats, b.ten.active)
+		didInteract, done, err := b.executeTenInteractionStep(ctx, stats, b.ten.active)
 		if err != nil {
 			return true, err
 		}
 		if done {
 			b.ten.active = nil
+			b.ten.activeNotVisible = 0
+		}
+		if !didInteract && !done {
+			b.ten.activeNotVisible++
+			if b.ten.activeNotVisible >= 6 {
+				logrus.WithFields(logrus.Fields{"instance": b.config.InstanceID, "feed_id": b.ten.active.FeedID}).Warn("ten-times active 目标长时间不可见，回退正常浏览")
+				b.ten.active = nil
+				b.ten.activeNotVisible = 0
+				return false, nil
+			}
+		} else if didInteract {
+			b.ten.activeNotVisible = 0
 		}
 		return true, nil
 	}
@@ -317,8 +351,8 @@ func (b *BrowseAction) processTenTimesIfNeeded(ctx context.Context, stats *Brows
 			}
 		}
 		authorName = strings.TrimSpace(authorName)
-		matchedTarget := false
-		if authorName != "" {
+		matchedTarget := b.ten.forceAll
+		if !matchedTarget && authorName != "" {
 			_, matchedTarget = b.ten.targets[authorName]
 		}
 		logrus.WithFields(logrus.Fields{
@@ -344,8 +378,13 @@ func (b *BrowseAction) processTenTimesIfNeeded(ctx context.Context, stats *Brows
 		}
 
 		title := ""
+		if t, tErr := b.extractTitleFromCard(card); tErr == nil {
+			title = strings.TrimSpace(t)
+		}
 		if f, ok := feedMap[feedID]; ok {
-			title = strings.TrimSpace(f.NoteCard.DisplayTitle)
+			if title == "" {
+				title = strings.TrimSpace(f.NoteCard.DisplayTitle)
+			}
 			if title == "" {
 				title = strings.TrimSpace(f.NoteCard.Type)
 			}
@@ -367,13 +406,18 @@ func (b *BrowseAction) processTenTimesIfNeeded(ctx context.Context, stats *Brows
 	b.ten.queue = b.ten.queue[1:]
 	delete(b.ten.enqueued, task.FeedID)
 	b.ten.active = task
+	b.ten.activeNotVisible = 0
 
-	_, done, err := b.executeTenInteractionStep(ctx, stats, task)
+	didInteract, done, err := b.executeTenInteractionStep(ctx, stats, task)
 	if err != nil {
 		return true, err
 	}
 	if done {
 		b.ten.active = nil
+		b.ten.activeNotVisible = 0
+	}
+	if didInteract {
+		b.ten.activeNotVisible = 0
 	}
 	return true, nil
 }
@@ -453,7 +497,7 @@ func (b *BrowseAction) executeTenInteractionStep(ctx context.Context, stats *Bro
 	} else {
 		waitForNoteModalClosed(page, 3*time.Second)
 	}
-	pause(800, 1800)
+	pause(900, 1300)
 
 	st.Count++
 	st.UpdatedAt = time.Now()
@@ -536,6 +580,49 @@ func (b *BrowseAction) extractAuthorNameFromCard(card *rod.Element) (string, err
 	return "", fmt.Errorf("author not found")
 }
 
+func (b *BrowseAction) extractTitleFromCard(card *rod.Element) (string, error) {
+	if card == nil {
+		return "", fmt.Errorf("nil card")
+	}
+
+	selectors := []string{
+		"a.title span",
+		"a.title",
+		".title span",
+		".title",
+		"a[class*='title'] span",
+		"a[class*='title']",
+	}
+
+	for _, sel := range selectors {
+		el, err := card.Element(sel)
+		if err != nil || el == nil {
+			continue
+		}
+		text, textErr := el.Text()
+		if textErr != nil {
+			continue
+		}
+		text = strings.TrimSpace(text)
+		if isReasonableNoteTitle(text) {
+			return text, nil
+		}
+	}
+
+	return "", fmt.Errorf("title not found")
+}
+
+func isReasonableNoteTitle(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	if len([]rune(s)) > 120 {
+		return false
+	}
+	return true
+}
+
 func isReasonableAuthorName(s string) bool {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -594,13 +681,11 @@ func scrollModalOnce(page *rod.Page) (before int, after int, err error) {
 		const modal = document.querySelector('.note-detail-modal') ||
 		             document.querySelector('.modal') ||
 		             document.querySelector('[class*="detail"]');
+		if (!modal) return { ok: false, before: 0, after: 0 };
 		const candidates = [];
-		if (modal) {
-			candidates.push(modal);
-			const scroller = modal.querySelector('.note-scroller') || modal.querySelector('[class*="scroller"]') || modal.querySelector('[class*="scroll"]');
-			if (scroller) candidates.push(scroller);
-		}
-		candidates.push(document.scrollingElement || document.documentElement);
+		candidates.push(modal);
+		const scroller = modal.querySelector('.note-scroller') || modal.querySelector('[class*="scroller"]') || modal.querySelector('[class*="scroll"]');
+		if (scroller) candidates.push(scroller);
 
 		let el = null;
 		for (const c of candidates) {
@@ -627,24 +712,37 @@ func scrollModalOnce(page *rod.Page) (before int, after int, err error) {
 func newTenTimesManager(instanceID string) (*tenTimesManager, error) {
 	timesPath, completedPath, statePath := resolveTenFiles(instanceID)
 
-	targets, err := readLinesAsSet(timesPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
+	forceAll := false
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv("TEN_TIMES_FORCE_ALL"))); v != "" {
+		switch v {
+		case "1", "true", "yes", "on":
+			forceAll = true
 		}
-		return nil, err
-	}
-	if len(targets) == 0 {
-		return nil, nil
 	}
 
-	completedSet, err := readCompletedSet(completedPath)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			logrus.WithError(err).WithField("instance", instanceID).Warn("读取 ten_completed 失败，将忽略历史")
+	var targets map[string]struct{}
+	var err error
+	if !forceAll {
+		targets, err = readLinesAsSet(timesPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, nil
+			}
+			return nil, err
 		}
-		completedSet = make(map[string]struct{})
+		if len(targets) == 0 {
+			return nil, nil
+		}
+	} else {
+		targets = make(map[string]struct{})
+		logrus.WithField("instance", instanceID).Info("TEN_TIMES_FORCE_ALL 已开启：将对所有可见笔记执行十次互动")
 	}
+
+	// 每次运行时清空 ten_completed，确保本次运行输出的是“本次完成记录”。
+	if err := clearTenCompletedFile(completedPath); err != nil {
+		logrus.WithError(err).WithField("instance", instanceID).Warn("清空 ten_completed 失败，将继续运行但 completed 可能残留")
+	}
+	completedSet := make(map[string]struct{})
 
 	state, err := loadTenState(statePath)
 	if err != nil {
@@ -656,6 +754,7 @@ func newTenTimesManager(instanceID string) (*tenTimesManager, error) {
 
 	return &tenTimesManager{
 		instanceID:    instanceID,
+		forceAll:      forceAll,
 		targets:       targets,
 		completed:     completedSet,
 		state:         state,
@@ -665,6 +764,19 @@ func newTenTimesManager(instanceID string) (*tenTimesManager, error) {
 		completedPath: completedPath,
 		statePath:     statePath,
 	}, nil
+}
+
+func clearTenCompletedFile(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	dir := filepath.Dir(path)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return err
+		}
+	}
+	return os.WriteFile(path, []byte{}, 0644)
 }
 
 func (m *tenTimesManager) ensureState(feedID string) *tenNoteState {
@@ -716,9 +828,9 @@ func (m *tenTimesManager) appendCompleted(author, feedID, title string) error {
 	}
 	defer f.Close()
 
-	identifier := feedID
+	identifier := strings.TrimSpace(title)
 	if identifier == "" {
-		identifier = title
+		identifier = "(无标题)"
 	}
 	line := fmt.Sprintf("%s,%s\n", author, identifier)
 	if _, err := f.WriteString(line); err != nil {
@@ -1371,6 +1483,7 @@ func (b *BrowseAction) clickAndViewNote(ctx context.Context, stats *BrowseStats)
 
 
 	// false && (followStatus != FollowStatusFollowed && followStatus != FollowStatusMutual)临时禁用未关注直接退出逻辑
+	// followStatus != FollowStatusFollowed && followStatus != FollowStatusMutual正常逻辑
 
 	if followStatus != FollowStatusFollowed && followStatus != FollowStatusMutual {
 		logrus.Info("检测到未关注，停留 2-4 秒后直接退出（不执行互动）")
