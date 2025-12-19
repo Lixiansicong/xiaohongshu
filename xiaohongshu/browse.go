@@ -1368,6 +1368,10 @@ func (b *BrowseAction) clickAndViewNote(ctx context.Context, stats *BrowseStats)
 		logrus.Warnf("关注状态检测失败，将按未关注处理并退出: %v", followErr)
 		followStatus = FollowStatusNotFollowed
 	}
+
+
+	// false && (followStatus != FollowStatusFollowed && followStatus != FollowStatusMutual)临时禁用未关注直接退出逻辑
+
 	if followStatus != FollowStatusFollowed && followStatus != FollowStatusMutual {
 		logrus.Info("检测到未关注，停留 2-4 秒后直接退出（不执行互动）")
 		pause(2000, 4000)
