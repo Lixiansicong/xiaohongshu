@@ -2168,8 +2168,8 @@ func (b *BrowseAction) scrollCommentAreaIntoView(page *rod.Page) {
 
 // performCommentScrolling 在评论区内执行多次滚动并检测是否到底部
 func (b *BrowseAction) performCommentScrolling(page *rod.Page) {
-	// 随机滚动2-5次，每次检测是否到底部
-	maxScrolls := rand.Intn(4) + 2 // 2-5次
+	// 随机滚动4-10次，每次检测是否到底部
+	maxScrolls := rand.Intn(7) + 4 // 4-10次
 	for i := 0; i < maxScrolls; i++ {
 		// 获取滚动前的位置
 		beforeScroll, err := b.getScrollPosition(page)
@@ -2179,9 +2179,9 @@ func (b *BrowseAction) performCommentScrolling(page *rod.Page) {
 		}
 
 		// 执行滚动
-		scrollAmount := rand.Intn(400) + 300 // 300-700像素
+		scrollAmount := rand.Intn(300) + 200 // 200-500像素
 		page.Mouse.MustScroll(0, float64(scrollAmount))
-		pause(700, 1500)
+		pause(700, 2000)
 
 		// 获取滚动后的位置
 		afterScroll, err := b.getScrollPosition(page)
@@ -2194,8 +2194,8 @@ func (b *BrowseAction) performCommentScrolling(page *rod.Page) {
 		if afterScroll-beforeScroll < 50 { // 如果滚动距离小于50像素，认为到底了
 			logrus.Info("评论区已滚动到底部")
 
-			// 有30%概率回滚一下
-			if rand.Intn(100) < 30 {
+			// 有70%概率回滚一下
+			if rand.Intn(100) < 70 {
 				logrus.Info("回滚评论区")
 				backAmount := rand.Intn(300) + 200 // 回滚200-500像素
 				page.Mouse.MustScroll(0, float64(-backAmount))
