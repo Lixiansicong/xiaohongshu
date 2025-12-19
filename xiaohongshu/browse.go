@@ -1,10 +1,15 @@
 package xiaohongshu
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,32 +19,40 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+func isRodSessionNotFoundErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Session with given id not found") || strings.Contains(msg, "-32001")
+}
 
 const (
-	DefaultBrowseDurationMinutes  = 10
-	DefaultMinScrollsPerRound     = 2
-	DefaultMaxScrollsPerRound     = 5
-	DefaultClickProbability       = 70
-	DefaultInteractProbability    = 60
-	DefaultLikeOnlyProbability    = 30
+	DefaultBrowseDurationMinutes = 60
+	DefaultMinScrollsPerRound    = 1
+	DefaultMaxScrollsPerRound    = 3
+	DefaultClickProbability      = 100
+	DefaultInteractProbability   = 60
+	DefaultLikeOnlyProbability   = 30
 )
 
 // BrowseConfig 浏览配置
 type BrowseConfig struct {
 	// 浏览时长（分钟）
 	Duration int `json:"duration"`
+	InstanceID string `json:"instance_id,omitempty"`
 	// 滚动次数范围
 	MinScrolls int `json:"min_scrolls"`
 	MaxScrolls int `json:"max_scrolls"`
 	// 点击笔记的概率 (0-100)
 	ClickProbability int `json:"click_probability"`
-	// 在笔记中互动的概率 (0-100) - 点赞、收藏、评论一起执行
+	// 在笔记中互动的概率 (0-100) - 兼容保留（当前 follow-based 模式不使用）
 	InteractProbability int `json:"interact_probability"`
-	// 触发互动时，仅点赞不收藏的概率 (0-100)
+	// 触发互动时，仅点赞不收藏的概率 (0-100) - 兼容保留（当前 follow-based 模式不使用）
 	LikeOnlyProbability int `json:"like_only_probability,omitempty"`
-	// 是否启用评论（nil=默认启用, true=启用, false=禁用）
+	// 是否启用评论（nil=默认启用, true=启用, false=禁用）- 兼容保留（当前 follow-based 模式不使用）
 	EnableComment *bool `json:"enable_comment,omitempty"`
-	// 评论内容列表（可选，如果为空则自动从评论区获取）
+	// 评论内容列表（可选，如果为空则自动从评论区获取）- 兼容保留（当前 follow-based 模式不使用）
 	Comments []string `json:"comments,omitempty"`
 }
 
@@ -47,6 +60,37 @@ type BrowseConfig struct {
 type BrowseAction struct {
 	page   *rod.Page
 	config BrowseConfig
+	ten    *tenTimesManager
+}
+
+type tenTimesManager struct {
+	instanceID string
+	targets    map[string]struct{}
+	completed  map[string]struct{}
+	state      map[string]*tenNoteState
+	active     *tenTask
+	queue      []*tenTask
+	enqueued   map[string]struct{}
+
+	timesPath     string
+	completedPath string
+	statePath     string
+}
+
+type tenNoteState struct {
+	Author    string    `json:"author"`
+	FeedID    string    `json:"feed_id"`
+	Title     string    `json:"title,omitempty"`
+	Count     int       `json:"count"`
+	Completed bool      `json:"completed"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type tenTask struct {
+	Author    string
+	FeedID    string
+	XsecToken string
+	Title     string
 }
 
 // BrowseStats 浏览统计
@@ -77,16 +121,19 @@ func NewBrowseAction(page *rod.Page, config BrowseConfig) *BrowseAction {
 		config.ClickProbability = DefaultClickProbability // 点击概率
 	}
 	if config.InteractProbability == 0 {
-		config.InteractProbability = DefaultInteractProbability // 互动概率
+		config.InteractProbability = DefaultInteractProbability // 互动概率（兼容保留）
 	}
 	if config.LikeOnlyProbability <= 0 || config.LikeOnlyProbability > 100 {
-		config.LikeOnlyProbability = DefaultLikeOnlyProbability // 仅点赞概率
+		config.LikeOnlyProbability = DefaultLikeOnlyProbability // 仅点赞概率（兼容保留）
 	}
 
-	return &BrowseAction{
-		page:   page,
-		config: config,
+	tenMgr, err := newTenTimesManager(config.InstanceID)
+	if err != nil {
+		logrus.WithError(err).WithField("instance", config.InstanceID).Warn("ten-times 初始化失败，将回退正常模式")
+		tenMgr = nil
 	}
+
+	return &BrowseAction{page: page, config: config, ten: tenMgr}
 }
 
 // StartBrowse 开始浏览推荐页
@@ -105,7 +152,8 @@ func (b *BrowseAction) StartBrowse(ctx context.Context) (*BrowseStats, error) {
 	defer navCancel()
 	navPage := b.page.Context(navCtx)
 	navPage.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
-	time.Sleep(randomDuration(1000, 2000)) // 等待页面完全加载
+	waitForExploreReady(navPage, 6*time.Second) // 等待页面完全加载
+	pause(300, 700)
 
 	// 浏览时长
 	browseUntil := time.Now().Add(time.Duration(b.config.Duration) * time.Minute)
@@ -136,8 +184,9 @@ func (b *BrowseAction) StartBrowse(ctx context.Context) (*BrowseStats, error) {
 				refreshCtx, refreshCancel := context.WithTimeout(ctx, 60*time.Second)
 				refreshPage := b.page.Context(refreshCtx)
 				refreshPage.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
-				refreshCancel() // 导航完成后立即取消 context
-				time.Sleep(randomDuration(1500, 3000)) // 刷新后等待加载
+				refreshCancel()                                 // 导航完成后立即取消 context
+				waitForExploreReady(refreshPage, 6*time.Second) // 刷新后等待加载
+				pause(300, 700)
 
 				// 设置下一次刷新时间：2-5分钟后
 				nextRefreshTime = time.Now().Add(randomRefreshInterval())
@@ -151,7 +200,7 @@ func (b *BrowseAction) StartBrowse(ctx context.Context) (*BrowseStats, error) {
 			// 执行一轮浏览
 			if err := b.browseRound(ctx, stats); err != nil {
 				logrus.Warnf("浏览出错: %v", err)
-				time.Sleep(randomDuration(2000, 4000))
+				pause(1200, 2500)
 				continue
 			}
 		}
@@ -178,8 +227,17 @@ func (b *BrowseAction) browseRound(ctx context.Context, stats *BrowseStats) erro
 		}
 		stats.ScrollCount++
 
-		// 停留时间：中位数 2-4s（减少停留时间，使浏览更自然）
-		time.Sleep(randomDuration(2000, 4000))
+		// 停留时间：中位数 1-2s（减少停留时间，使浏览更自然）
+		pause(1000, 2000)
+
+		if b.ten != nil {
+			processed, err := b.processTenTimesIfNeeded(ctx, stats)
+			if err != nil {
+				logrus.WithError(err).WithField("instance", b.config.InstanceID).Warn("ten-times 处理异常，继续正常浏览")
+			} else if processed {
+				continue
+			}
+		}
 
 		// 根据概率决定是否点击笔记
 		if rand.Intn(100) < b.config.ClickProbability {
@@ -190,7 +248,8 @@ func (b *BrowseAction) browseRound(ctx context.Context, stats *BrowseStats) erro
 				recoverPage := page.Context(recoverCtx)
 				recoverPage.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
 				recoverCancel()
-				time.Sleep(randomDuration(1000, 2000))
+				waitForExploreReady(recoverPage, 6*time.Second)
+				pause(300, 700)
 			}
 		}
 	}
@@ -198,6 +257,980 @@ func (b *BrowseAction) browseRound(ctx context.Context, stats *BrowseStats) erro
 	return nil
 }
 
+func (b *BrowseAction) processTenTimesIfNeeded(ctx context.Context, stats *BrowseStats) (bool, error) {
+	if b.ten == nil {
+		return false, nil
+	}
+
+	page := b.page.Context(ctx)
+
+	if b.ten.active != nil {
+		_, done, err := b.executeTenInteractionStep(ctx, stats, b.ten.active)
+		if err != nil {
+			return true, err
+		}
+		if done {
+			b.ten.active = nil
+		}
+		return true, nil
+	}
+
+	feeds, _ := b.getFeedsFromPage(page)
+	feedMap := make(map[string]Feed, len(feeds))
+	for _, f := range feeds {
+		if f.ID != "" {
+			feedMap[f.ID] = f
+		}
+	}
+
+	cards, err := b.getVisibleNoteCards(page)
+	if err != nil {
+		return false, err
+	}
+
+	for _, card := range cards {
+		feedID, xsecToken, err := b.extractNoteInfo(card)
+		if err != nil || feedID == "" {
+			continue
+		}
+		st := b.ten.ensureState(feedID)
+		if st.Completed || st.Count >= 10 {
+			continue
+		}
+		if _, ok := b.ten.enqueued[feedID]; ok {
+			continue
+		}
+
+		authorName, nameErr := b.extractAuthorNameFromCard(card)
+		authorSource := "dom"
+		if nameErr != nil {
+			logrus.WithError(nameErr).WithFields(logrus.Fields{"feed_id": feedID, "instance": b.config.InstanceID}).Debug("提取博主名失败")
+			authorSource = "initial_state"
+		}
+		if strings.TrimSpace(authorName) == "" {
+			authorSource = "initial_state"
+		}
+
+		if authorName == "" {
+			if f, ok := feedMap[feedID]; ok {
+				authorName = normalizeNickname(f.NoteCard.User)
+			}
+		}
+		authorName = strings.TrimSpace(authorName)
+		matchedTarget := false
+		if authorName != "" {
+			_, matchedTarget = b.ten.targets[authorName]
+		}
+		logrus.WithFields(logrus.Fields{
+			"instance":       b.config.InstanceID,
+			"feed_id":        feedID,
+			"author":         authorName,
+			"author_source":  authorSource,
+			"matched_target": matchedTarget,
+		}).Info("ten-times 扫描卡片作者")
+		if authorName == "" {
+			continue
+		}
+
+		if !matchedTarget {
+			continue
+		}
+		if _, ok := b.ten.completed[completedKey(authorName, feedID)]; ok {
+			st.Completed = true
+			if st.Count < 10 {
+				st.Count = 10
+			}
+			continue
+		}
+
+		title := ""
+		if f, ok := feedMap[feedID]; ok {
+			title = strings.TrimSpace(f.NoteCard.DisplayTitle)
+			if title == "" {
+				title = strings.TrimSpace(f.NoteCard.Type)
+			}
+			if authorName == "" {
+				authorName = normalizeNickname(f.NoteCard.User)
+			}
+		}
+
+		b.ten.queue = append(b.ten.queue, &tenTask{Author: authorName, FeedID: feedID, XsecToken: xsecToken, Title: title})
+		b.ten.enqueued[feedID] = struct{}{}
+		logrus.WithFields(logrus.Fields{"instance": b.config.InstanceID, "author": authorName, "feed_id": feedID}).Info("ten-times 入队目标笔记")
+	}
+
+	if len(b.ten.queue) == 0 {
+		return false, nil
+	}
+
+	task := b.ten.queue[0]
+	b.ten.queue = b.ten.queue[1:]
+	delete(b.ten.enqueued, task.FeedID)
+	b.ten.active = task
+
+	_, done, err := b.executeTenInteractionStep(ctx, stats, task)
+	if err != nil {
+		return true, err
+	}
+	if done {
+		b.ten.active = nil
+	}
+	return true, nil
+}
+
+func (b *BrowseAction) executeTenInteractionStep(ctx context.Context, stats *BrowseStats, task *tenTask) (didInteract bool, done bool, err error) {
+	if b.ten == nil {
+		return false, false, nil
+	}
+	if task == nil || strings.TrimSpace(task.FeedID) == "" {
+		return false, false, nil
+	}
+
+	select {
+	case <-ctx.Done():
+		return false, false, ctx.Err()
+	default:
+	}
+
+	st := b.ten.ensureState(task.FeedID)
+	st.Author = strings.TrimSpace(task.Author)
+	st.FeedID = strings.TrimSpace(task.FeedID)
+	if st.Title == "" {
+		st.Title = task.Title
+	}
+
+	if _, ok := b.ten.completed[completedKey(st.Author, st.FeedID)]; ok {
+		st.Completed = true
+		if st.Count < 10 {
+			st.Count = 10
+		}
+	}
+
+	if st.Completed || st.Count >= 10 {
+		return false, true, nil
+	}
+
+	page := b.page.Context(ctx)
+
+	card, findErr := b.findVisibleCardByFeedID(page, task.FeedID)
+	if findErr != nil || card == nil {
+		logrus.WithFields(logrus.Fields{"instance": b.config.InstanceID, "author": task.Author, "feed_id": task.FeedID, "count": st.Count}).Info("ten-times 当前目标不可见，继续滚动等待")
+		return false, false, nil
+	}
+
+	var isRealVideo bool
+	var openErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		isRealVideo, openErr = b.openNoteFromCard(page, card, task.FeedID, stats)
+		if openErr == nil {
+			break
+		}
+		pause(600, 1100)
+	}
+	if openErr != nil {
+		logrus.WithError(openErr).WithFields(logrus.Fields{"instance": b.config.InstanceID, "author": task.Author, "feed_id": task.FeedID}).Warn("ten-times 打开笔记失败，将稍后重试")
+		return false, false, nil
+	}
+
+	logrus.WithFields(logrus.Fields{"instance": b.config.InstanceID, "author": task.Author, "feed_id": task.FeedID, "round": st.Count + 1}).Info("ten-times 开始互动")
+
+	if browseErr := b.browseNoteToBottom(page, task.FeedID, isRealVideo); browseErr != nil {
+		logrus.WithError(browseErr).WithFields(logrus.Fields{"instance": b.config.InstanceID, "author": task.Author, "feed_id": task.FeedID}).Warn("ten-times 浏览到底失败")
+	}
+
+	if st.Count == 0 {
+		logrus.WithFields(logrus.Fields{"instance": b.config.InstanceID, "author": task.Author, "feed_id": task.FeedID}).Info("ten-times 首次互动：尝试点赞+收藏")
+		b.forceLikeAndFavoriteInModal(page, task.FeedID, stats)
+	}
+
+	if err := b.closeNoteModal(page); err != nil {
+		logrus.WithError(err).WithFields(logrus.Fields{"instance": b.config.InstanceID, "author": task.Author, "feed_id": task.FeedID}).Warn("ten-times 关闭弹窗失败")
+		fallbackCtx, fallbackCancel := context.WithTimeout(ctx, 60*time.Second)
+		fallbackPage := page.Context(fallbackCtx)
+		fallbackPage.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
+		fallbackCancel()
+		waitForExploreReady(fallbackPage, 6*time.Second)
+	} else {
+		waitForNoteModalClosed(page, 3*time.Second)
+	}
+	pause(800, 1800)
+
+	st.Count++
+	st.UpdatedAt = time.Now()
+	if st.Count >= 10 {
+		st.Completed = true
+	}
+	if err := b.ten.saveState(); err != nil {
+		logrus.WithError(err).WithField("instance", b.config.InstanceID).Warn("ten-times 保存状态失败")
+	}
+
+	logrus.WithFields(logrus.Fields{"instance": b.config.InstanceID, "author": task.Author, "feed_id": task.FeedID, "count": st.Count}).Info("ten-times 单次互动完成")
+
+	if st.Completed {
+		if err := b.ten.appendCompleted(task.Author, task.FeedID, st.Title); err != nil {
+			logrus.WithError(err).WithField("instance", b.config.InstanceID).Warn("ten-times 写入 completed 失败")
+		}
+		logrus.WithFields(logrus.Fields{"instance": b.config.InstanceID, "author": task.Author, "feed_id": task.FeedID}).Info("ten-times 十次互动完成")
+		return true, true, nil
+	}
+
+	return true, false, nil
+}
+
+func (b *BrowseAction) findVisibleCardByFeedID(page *rod.Page, feedID string) (*rod.Element, error) {
+	cards, err := b.getVisibleNoteCards(page)
+	if err != nil {
+		return nil, err
+	}
+	for _, card := range cards {
+		id, _, _ := b.extractNoteInfo(card)
+		if id == feedID {
+			return card, nil
+		}
+	}
+	return nil, fmt.Errorf("not visible")
+}
+
+func (b *BrowseAction) extractAuthorNameFromCard(card *rod.Element) (string, error) {
+	if card == nil {
+		return "", fmt.Errorf("nil card")
+	}
+
+	selectors := []struct {
+		anchorSel string
+		nameSel   string
+	}{
+		{anchorSel: "a.author", nameSel: "span.name"},
+		{anchorSel: "a.author", nameSel: ".name"},
+		{anchorSel: "a[class*='author']", nameSel: "span.name"},
+		{anchorSel: "a[class*='author']", nameSel: "span[class*='name']"},
+		{anchorSel: "a[class*='author']", nameSel: "[class*='name']"},
+	}
+
+	for _, sel := range selectors {
+		anchor, err := card.Element(sel.anchorSel)
+		if err != nil || anchor == nil {
+			continue
+		}
+		nameEl, err := anchor.Element(sel.nameSel)
+		if err == nil && nameEl != nil {
+			text, textErr := nameEl.Text()
+			if textErr == nil {
+				text = strings.TrimSpace(text)
+				if isReasonableAuthorName(text) {
+					return text, nil
+				}
+			}
+		}
+
+		text := ""
+		_ = rod.Try(func() {
+			text = anchor.MustEval(`() => (this.textContent || "").trim()`).String()
+		})
+		text = strings.TrimSpace(text)
+		if isReasonableAuthorName(text) {
+			return text, nil
+		}
+	}
+
+	return "", fmt.Errorf("author not found")
+}
+
+func isReasonableAuthorName(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	if len([]rune(s)) > 40 {
+		return false
+	}
+	return true
+}
+
+func normalizeNickname(u User) string {
+	if strings.TrimSpace(u.Nickname) != "" {
+		return strings.TrimSpace(u.Nickname)
+	}
+	if strings.TrimSpace(u.NickName) != "" {
+		return strings.TrimSpace(u.NickName)
+	}
+	return ""
+}
+
+func (b *BrowseAction) browseNoteToBottom(page *rod.Page, feedID string, isRealVideo bool) error {
+	_ = feedID
+	if isRealVideo {
+		pause(4000, 9000)
+	} else {
+		pause(1200, 2400)
+	}
+
+	maxRounds := 18
+	stable := 0
+	for i := 0; i < maxRounds; i++ {
+		before, after, err := scrollModalOnce(page)
+		if err != nil {
+			break
+		}
+		if after-before < 40 {
+			stable++
+		} else {
+			stable = 0
+		}
+		pause(450, 900)
+		if stable >= 2 {
+			break
+		}
+	}
+
+	if err := b.scrollCommentArea(page); err != nil {
+		logrus.WithError(err).Debug("ten-times 评论区滚动失败")
+	}
+	return nil
+}
+
+func scrollModalOnce(page *rod.Page) (before int, after int, err error) {
+	res := page.MustEval(`() => {
+		const modal = document.querySelector('.note-detail-modal') ||
+		             document.querySelector('.modal') ||
+		             document.querySelector('[class*="detail"]');
+		const candidates = [];
+		if (modal) {
+			candidates.push(modal);
+			const scroller = modal.querySelector('.note-scroller') || modal.querySelector('[class*="scroller"]') || modal.querySelector('[class*="scroll"]');
+			if (scroller) candidates.push(scroller);
+		}
+		candidates.push(document.scrollingElement || document.documentElement);
+
+		let el = null;
+		for (const c of candidates) {
+			if (!c) continue;
+			const ch = c.clientHeight || 0;
+			const sh = c.scrollHeight || 0;
+			if (sh > ch + 10) { el = c; break; }
+		}
+		if (!el) return { ok: false, before: 0, after: 0 };
+		const before = el.scrollTop || 0;
+		const step = 600 + Math.floor(Math.random() * 350);
+		el.scrollTop = Math.min(before + step, (el.scrollHeight || 0));
+		const after = el.scrollTop || 0;
+		return { ok: true, before, after };
+	}`)
+
+	ok := res.Get("ok").Bool()
+	if !ok {
+		return 0, 0, fmt.Errorf("no scrollable")
+	}
+	return res.Get("before").Int(), res.Get("after").Int(), nil
+}
+
+func newTenTimesManager(instanceID string) (*tenTimesManager, error) {
+	timesPath, completedPath, statePath := resolveTenFiles(instanceID)
+
+	targets, err := readLinesAsSet(timesPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if len(targets) == 0 {
+		return nil, nil
+	}
+
+	completedSet, err := readCompletedSet(completedPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			logrus.WithError(err).WithField("instance", instanceID).Warn("读取 ten_completed 失败，将忽略历史")
+		}
+		completedSet = make(map[string]struct{})
+	}
+
+	state, err := loadTenState(statePath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			logrus.WithError(err).WithField("instance", instanceID).Warn("读取 ten_state 失败，将从空状态开始")
+		}
+		state = make(map[string]*tenNoteState)
+	}
+
+	return &tenTimesManager{
+		instanceID:    instanceID,
+		targets:       targets,
+		completed:     completedSet,
+		state:         state,
+		queue:         make([]*tenTask, 0, 8),
+		enqueued:      make(map[string]struct{}),
+		timesPath:     timesPath,
+		completedPath: completedPath,
+		statePath:     statePath,
+	}, nil
+}
+
+func (m *tenTimesManager) ensureState(feedID string) *tenNoteState {
+	if m.state == nil {
+		m.state = make(map[string]*tenNoteState)
+	}
+	st, ok := m.state[feedID]
+	if !ok || st == nil {
+		st = &tenNoteState{FeedID: feedID}
+		m.state[feedID] = st
+	}
+	if _, ok := m.completed[completedKey(st.Author, feedID)]; ok {
+		st.Completed = true
+		if st.Count < 10 {
+			st.Count = 10
+		}
+	}
+	return st
+}
+
+func (m *tenTimesManager) saveState() error {
+	if m == nil {
+		return nil
+	}
+	data, err := json.MarshalIndent(m.state, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(m.statePath, data, 0644)
+}
+
+func (m *tenTimesManager) appendCompleted(author, feedID, title string) error {
+	if m == nil {
+		return nil
+	}
+	author = strings.TrimSpace(author)
+	feedID = strings.TrimSpace(feedID)
+	key := completedKey(author, feedID)
+	if _, ok := m.completed[key]; ok {
+		return nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(m.completedPath), 0755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(m.completedPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	identifier := feedID
+	if identifier == "" {
+		identifier = title
+	}
+	line := fmt.Sprintf("%s,%s\n", author, identifier)
+	if _, err := f.WriteString(line); err != nil {
+		return err
+	}
+	m.completed[key] = struct{}{}
+	return nil
+}
+
+func completedKey(author, feedID string) string {
+	return strings.TrimSpace(author) + "," + strings.TrimSpace(feedID)
+}
+
+func resolveTenFiles(instanceID string) (timesPath, completedPath, statePath string) {
+	suffix := instanceNumberSuffix(instanceID)
+
+	tryPaths := func(name string) []string {
+		paths := make([]string, 0, 3)
+		if wd, err := os.Getwd(); err == nil {
+			paths = append(paths, filepath.Join(wd, name))
+		}
+		if exe, err := os.Executable(); err == nil {
+			paths = append(paths, filepath.Join(filepath.Dir(exe), name))
+		}
+		paths = append(paths, name)
+		return paths
+	}
+
+	resolveExistingOrFirst := func(name string) string {
+		for _, p := range tryPaths(name) {
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+		if wd, err := os.Getwd(); err == nil {
+			return filepath.Join(wd, name)
+		}
+		return name
+	}
+
+	if suffix != "" {
+		timesPath = resolveExistingOrFirst(fmt.Sprintf("ten_times%s.txt", suffix))
+		completedPath = resolveExistingOrFirst(fmt.Sprintf("ten_completed%s.txt", suffix))
+		statePath = resolveExistingOrFirst(fmt.Sprintf("ten_state%s.json", suffix))
+		return
+	}
+
+	timesPath = resolveExistingOrFirst("ten_times.txt")
+	completedPath = resolveExistingOrFirst("ten_completed.txt")
+	statePath = resolveExistingOrFirst("ten_state.json")
+	return
+}
+
+func instanceNumberSuffix(instanceID string) string {
+	instanceID = strings.TrimSpace(instanceID)
+	if instanceID == "" {
+		return ""
+	}
+	re := regexp.MustCompile(`(\d+)$`)
+	m := re.FindStringSubmatch(instanceID)
+	if len(m) < 2 {
+		return ""
+	}
+	_, err := strconv.Atoi(m[1])
+	if err != nil {
+		return ""
+	}
+	return m[1]
+}
+
+func readLinesAsSet(path string) (map[string]struct{}, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	set := make(map[string]struct{})
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		set[line] = struct{}{}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return set, nil
+}
+
+func readCompletedSet(path string) (map[string]struct{}, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	set := make(map[string]struct{})
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		set[line] = struct{}{}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return set, nil
+}
+
+func loadTenState(path string) (map[string]*tenNoteState, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return make(map[string]*tenNoteState), nil
+	}
+
+	state := make(map[string]*tenNoteState)
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, err
+	}
+	return state, nil
+}
+
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func (b *BrowseAction) getNoteModalRoot(page *rod.Page) (*rod.Element, error) {
+	selectors := []string{
+		".note-detail-modal",
+		".modal",
+		"[class*='detail']",
+	}
+
+	for i := 0; i < 6; i++ {
+		for _, sel := range selectors {
+			var el *rod.Element
+			err := rod.Try(func() {
+				el = page.Timeout(500 * time.Millisecond).MustElement(sel)
+			})
+			if err != nil || el == nil {
+				continue
+			}
+			if visible, _ := el.Visible(); visible {
+				return el, nil
+			}
+		}
+		time.Sleep(120 * time.Millisecond)
+	}
+
+	return nil, fmt.Errorf("未找到笔记详情弹窗容器")
+}
+
+func normalizeModalSelector(sel string) string {
+	sel = strings.TrimPrefix(sel, ".note-detail-modal ")
+	sel = strings.TrimPrefix(sel, ".modal ")
+	return sel
+}
+
+func (b *BrowseAction) getInteractStateFromInitialState(page *rod.Page, feedID string) (liked bool, collected bool, err error) {
+	// 注意：__INITIAL_STATE__ 可能存在循环引用，不能直接 JSON.stringify(window.__INITIAL_STATE__)
+	// 这里仅提取我们需要的 liked/collected 字段。
+	var result string
+	evalErr := rod.Try(func() {
+		result = page.Timeout(2*time.Second).MustEval(`(feedID) => {
+			try {
+				const s = window.__INITIAL_STATE__;
+				if (!s || !s.note || !s.note.noteDetailMap) return "";
+				const detail = s.note.noteDetailMap[feedID];
+				if (!detail || !detail.note || !detail.note.interactInfo) return "";
+				const ii = detail.note.interactInfo;
+				return JSON.stringify({ liked: !!ii.liked, collected: !!ii.collected });
+			} catch (e) {
+				return "";
+			}
+		}`, feedID).String()
+	})
+	if evalErr != nil {
+		return false, false, fmt.Errorf("读取 __INITIAL_STATE__ 失败: %w", evalErr)
+	}
+	if result == "" {
+		return false, false, fmt.Errorf("__INITIAL_STATE__ not found or missing interactInfo")
+	}
+
+	var state struct {
+		Liked     bool `json:"liked"`
+		Collected bool `json:"collected"`
+	}
+	if err := json.Unmarshal([]byte(result), &state); err != nil {
+		return false, false, err
+	}
+
+	return state.Liked, state.Collected, nil
+}
+
+type FollowStatus int
+
+const (
+	FollowStatusUnknown FollowStatus = iota
+	FollowStatusNotFollowed
+	FollowStatusFollowed
+	FollowStatusMutual
+)
+
+func (b *BrowseAction) getFollowStatusInModal(page *rod.Page) (FollowStatus, error) {
+	modal, err := b.getNoteModalRoot(page)
+	if err != nil {
+		// 允许 modal 识别失败，后续走 JS 全局扫描兜底
+		modal = nil
+	}
+
+	selectors := []string{
+		"button.follow-button",
+		".follow-button",
+		"button[class*='follow']",
+	}
+
+	var btn *rod.Element
+	if modal != nil {
+		for i := 0; i < 6 && btn == nil; i++ {
+			for _, sel := range selectors {
+				var el *rod.Element
+				err := rod.Try(func() {
+					el = modal.Timeout(500 * time.Millisecond).MustElement(sel)
+				})
+				if err != nil || el == nil {
+					continue
+				}
+				if visible, _ := el.Visible(); !visible {
+					continue
+				}
+				btn = el
+				break
+			}
+			if btn == nil {
+				time.Sleep(120 * time.Millisecond)
+			}
+		}
+	}
+
+	// 快速路径：如果找到了按钮，优先用按钮 text/class 判定
+	if btn != nil {
+		text, _ := btn.Text()
+		text = strings.TrimSpace(text)
+		cls, _ := btn.Attribute("class")
+		classStr := ""
+		if cls != nil {
+			classStr = *cls
+		}
+		logrus.Infof("关注按钮命中(选择器)：text=%s class=%s", text, classStr)
+
+		if strings.Contains(text, "互相关注") {
+			return FollowStatusMutual, nil
+		}
+		if strings.Contains(text, "已关注") {
+			return FollowStatusFollowed, nil
+		}
+		if strings.Contains(text, "关注") {
+			return FollowStatusNotFollowed, nil
+		}
+		if strings.Contains(classStr, "outlined") {
+			return FollowStatusFollowed, nil
+		}
+		if strings.Contains(classStr, "primary") {
+			return FollowStatusNotFollowed, nil
+		}
+	}
+
+	// 兜底：用 JS 扫描页面内可见 button，按文本“关注/已关注/互相关注”识别
+	resultJSON := page.Timeout(2 * time.Second).MustEval(`() => {
+		const normalizeText = (t) => (t || '').replace(/\s+/g, ' ').trim();
+		const roots = [];
+		const modal = document.querySelector('.note-detail-modal') || document.querySelector('.modal');
+		if (modal) roots.push(modal);
+		roots.push(document);
+
+		const isVisible = (el) => {
+			if (!el) return false;
+			const rect = el.getBoundingClientRect();
+			if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+			const style = window.getComputedStyle(el);
+			if (!style) return false;
+			if (style.visibility === 'hidden' || style.display === 'none' || parseFloat(style.opacity || '1') === 0) return false;
+			return true;
+		};
+
+		const candidates = [];
+		const seen = new Set();
+		for (const root of roots) {
+			const btns = root.querySelectorAll('button');
+			for (const b of btns) {
+				if (!isVisible(b)) continue;
+				const text = normalizeText(b.innerText);
+				const cls = (b.className || '').toString();
+				if (!text && !cls) continue;
+				if (!(text.includes('关注') || cls.includes('follow'))) continue;
+				const key = text + '|' + cls;
+				if (seen.has(key)) continue;
+				seen.add(key);
+				candidates.push({ text, class: cls });
+			}
+		}
+
+		const pick = (pred) => candidates.find(c => pred(c));
+		const mutual = pick(c => c.text.includes('互相关注'));
+		const followed = pick(c => c.text.includes('已关注'));
+		const notFollowed = pick(c => c.text === '关注' || c.text.includes('关注'));
+
+		const chosen = mutual || followed || notFollowed || null;
+		return JSON.stringify({
+			found: !!chosen,
+			text: chosen ? chosen.text : '',
+			class: chosen ? chosen.class : '',
+			candidates
+		});
+	}`).String()
+
+	var scan struct {
+		Found      bool   `json:"found"`
+		Text       string `json:"text"`
+		Class      string `json:"class"`
+		Candidates []struct {
+			Text  string `json:"text"`
+			Class string `json:"class"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal([]byte(resultJSON), &scan); err != nil {
+		return FollowStatusUnknown, fmt.Errorf("关注状态 JS 扫描结果解析失败: %w", err)
+	}
+
+	if !scan.Found {
+		return FollowStatusUnknown, fmt.Errorf("未找到关注按钮")
+	}
+
+	logrus.Infof("关注按钮命中(JS)：text=%s class=%s", scan.Text, scan.Class)
+	if strings.Contains(scan.Text, "互相关注") {
+		return FollowStatusMutual, nil
+	}
+	if strings.Contains(scan.Text, "已关注") {
+		return FollowStatusFollowed, nil
+	}
+	if strings.Contains(scan.Text, "关注") {
+		return FollowStatusNotFollowed, nil
+	}
+	if strings.Contains(scan.Class, "outlined") {
+		return FollowStatusFollowed, nil
+	}
+	if strings.Contains(scan.Class, "primary") {
+		return FollowStatusNotFollowed, nil
+	}
+
+	return FollowStatusUnknown, fmt.Errorf("关注按钮状态未知: text=%s", scan.Text)
+}
+
+func isPressedLikeOrCollect(elem *rod.Element) bool {
+	if elem == nil {
+		return false
+	}
+
+	res, err := elem.Eval(`() => {
+		try {
+			const el = this;
+			const aria = el.getAttribute('aria-pressed');
+			if (aria === 'true') return true;
+
+			const host = el.closest('.like-wrapper,.collect-wrapper') || el;
+			const cls = (host.className || '').toString();
+			if (/(^|\s)(active|selected|liked|collected|is-active)(\s|$)/i.test(cls)) return true;
+			if (/(^|\s)(like-active|collect-active)(\s|$)/i.test(cls)) {
+				const useEl = host.querySelector('use');
+				const href = useEl ? (useEl.getAttribute('href') || useEl.getAttribute('xlink:href') || '') : '';
+				// 小红书已点赞/已收藏的标记：#liked / #collected
+				if (href === '#liked' || href === '#collected') return true;
+				if (href && href !== '#like' && href !== '#collect') return true;
+			}
+
+			const useEl = host.querySelector('use');
+			const href = useEl ? (useEl.getAttribute('href') || useEl.getAttribute('xlink:href') || '') : '';
+			if (href) {
+				if (href === '#liked' || href === '#collected') return true;
+				if (href === '#like' || href === '#collect') return false;
+				const lower = href.toLowerCase();
+				if (/(like|collect)/.test(lower) && /(fill|filled|active|selected|liked|collected|on)/.test(lower)) return true;
+			}
+			const pressedHost = el.closest('[aria-pressed]');
+			if (pressedHost && pressedHost.getAttribute('aria-pressed') === 'true') return true;
+			const activeHost = el.closest('.active,.selected,.is-active,.liked,.collected');
+			if (activeHost) return true;
+			return false;
+		} catch (e) {
+			return false;
+		}
+	}`)
+	if err != nil || res == nil {
+		return false
+	}
+	return res.Value.Bool()
+}
+
+func (b *BrowseAction) getLikeCollectStateFromDOM(modal *rod.Element) (liked bool, collected bool, err error) {
+	if modal == nil {
+		return false, false, fmt.Errorf("modal is nil")
+	}
+
+	findVisible := func(selectors []string) (*rod.Element, error) {
+		for _, sel := range selectors {
+			var el *rod.Element
+			err := rod.Try(func() {
+				el = modal.Timeout(500 * time.Millisecond).MustElement(sel)
+			})
+			if err != nil || el == nil {
+				continue
+			}
+			if visible, _ := el.Visible(); !visible {
+				continue
+			}
+			return el, nil
+		}
+		return nil, fmt.Errorf("not found")
+	}
+
+	likeSelectors := []string{
+		".interact-container .left .like-wrapper",
+		".left .like-wrapper",
+		".like-wrapper",
+		".interact-container .left .like-lottie",
+		".like-lottie",
+		".reds-icon.like-icon",
+		"[class*='like']",
+	}
+	collectSelectors := []string{
+		"#note-page-collect-board-guide",
+		".interact-container .left .collect-wrapper",
+		".left .collect-wrapper",
+		".collect-wrapper",
+		".interact-container .left .reds-icon.collect-icon",
+		".collect-icon",
+		".reds-icon.collect-icon",
+		"[class*='collect']",
+	}
+
+	likeEl, _ := findVisible(likeSelectors)
+	collectEl, _ := findVisible(collectSelectors)
+	if likeEl == nil && collectEl == nil {
+		return false, false, fmt.Errorf("未找到点赞/收藏按钮")
+	}
+
+	if likeEl != nil {
+		liked = isPressedLikeOrCollect(likeEl)
+	}
+	if collectEl != nil {
+		collected = isPressedLikeOrCollect(collectEl)
+	}
+
+	return liked, collected, nil
+}
+
+func (b *BrowseAction) forceLikeAndFavoriteInModal(page *rod.Page, feedID string, stats *BrowseStats) {
+	modal, modalErr := b.getNoteModalRoot(page)
+	if modalErr != nil {
+		logrus.Warnf("未找到弹窗容器，跳过点赞/收藏: %v", modalErr)
+		return
+	}
+	likedDOM, collectedDOM, domErr := b.getLikeCollectStateFromDOM(modal)
+	if domErr != nil {
+		logrus.Warnf("互动状态(DOM)读取失败，将直接尝试点赞/收藏（仍会在 likeInModal/favoriteInModal 内做防撤销判断）: %v", domErr)
+	}
+	logrus.Infof("互动状态(DOM)：liked=%v collected=%v", likedDOM, collectedDOM)
+
+	if !likedDOM {
+		logrus.Info("准备点赞：当前未点赞")
+		if err := b.likeInModal(page); err != nil {
+			logrus.Warnf("点赞失败: %v", err)
+		} else {
+			logrus.Info("点赞完成")
+			stats.LikeCount++
+			pause(300, 900)
+		}
+	} else {
+		logrus.Info("跳过点赞：已点赞（防撤销）")
+	}
+
+	// 点赞后 UI 可能会重绘，收藏前再刷新一次状态
+	likedDOM, collectedDOM, _ = b.getLikeCollectStateFromDOM(modal)
+	if !collectedDOM {
+		logrus.Info("准备收藏：当前未收藏")
+		if err := b.favoriteInModal(page); err != nil {
+			logrus.Warnf("收藏失败: %v", err)
+		} else {
+			logrus.Info("收藏完成")
+			stats.FavoriteCount++
+			pause(400, 1100)
+		}
+	} else {
+		logrus.Info("跳过收藏：已收藏（防撤销）")
+	}
+}
 
 // humanLikeScrollWithBacktrack 模拟人类滚动（优化版，包含回滚机制）
 // 基于真实用户行为参数：
@@ -208,8 +1241,8 @@ func (b *BrowseAction) humanLikeScrollWithBacktrack(page *rod.Page) error {
 	// 随机选择滚动方式
 	scrollType := rand.Intn(3)
 
-    // 主滚动动作 - 减少滚动距离，使浏览更自然
-    scrollAmount := rand.Intn(500) + 400 // 400-900像素（减少滚动幅度）
+	// 主滚动动作 - 减少滚动距离，使浏览更自然
+	scrollAmount := rand.Intn(500) + 400 // 400-900像素（减少滚动幅度）
 
 	switch scrollType {
 	case 0:
@@ -224,7 +1257,7 @@ func (b *BrowseAction) humanLikeScrollWithBacktrack(page *rod.Page) error {
 			page.Mouse.MustScroll(0, float64(segmentScroll))
 
 			// 插入短暂停：0.2-1.2s
-			time.Sleep(randomDuration(200, 1200))
+			time.Sleep(randomDuration(150, 700))
 		}
 
 	case 1:
@@ -233,18 +1266,18 @@ func (b *BrowseAction) humanLikeScrollWithBacktrack(page *rod.Page) error {
 		for i := 0; i < times; i++ {
 			page.MustElement("body").MustKeyActions().Press(input.ArrowDown).MustDo()
 			// 插入短暂停：0.2-1.2s
-			time.Sleep(randomDuration(200, 1200))
+			time.Sleep(randomDuration(150, 700))
 		}
 
 	case 2:
 		// 使用 JavaScript 滚动
 		page.MustEval(fmt.Sprintf(`() => window.scrollBy({top: %d, behavior: 'smooth'})`, scrollAmount))
 		// 等待滚动动画完成
-		time.Sleep(randomDuration(600, 1000))
+		time.Sleep(randomDuration(450, 800))
 	}
 
 	// 滚动段时长：0.6-2.5s
-	time.Sleep(randomDuration(600, 2500))
+	time.Sleep(randomDuration(400, 1400))
 
 	// 回滚概率：7-18%
 	backtrackProbability := rand.Intn(12) + 7 // 7-18
@@ -258,7 +1291,7 @@ func (b *BrowseAction) humanLikeScrollWithBacktrack(page *rod.Page) error {
 			times := rand.Intn(2) + 1
 			for i := 0; i < times; i++ {
 				page.MustElement("body").MustKeyActions().Press(input.ArrowUp).MustDo()
-				time.Sleep(randomDuration(200, 500))
+				time.Sleep(randomDuration(150, 400))
 			}
 		} else {
 			// 鼠标或JS回滚
@@ -266,7 +1299,7 @@ func (b *BrowseAction) humanLikeScrollWithBacktrack(page *rod.Page) error {
 		}
 
 		// 回滚后的停顿
-		time.Sleep(randomDuration(500, 1500))
+		time.Sleep(randomDuration(350, 1000))
 	}
 
 	return nil
@@ -301,9 +1334,58 @@ func (b *BrowseAction) clickAndViewNote(ctx context.Context, stats *BrowseStats)
 	}
 
 	// 步骤6&7: 点击进入笔记并等待页面加载（基于加载耗时检测是否为真视频）
-	isRealVideo, err := b.openNoteFromCard(page, selectedCard, feedID, stats)
+	var isRealVideo bool
+	for attempt := 0; attempt < 2; attempt++ {
+		isRealVideo, err = b.openNoteFromCard(page, selectedCard, feedID, stats)
+		if err == nil {
+			break
+		}
+		if attempt == 0 && isRodSessionNotFoundErr(err) {
+			logrus.Warnf("检测到 Rod session 失效，尝试刷新并重试点击: %v", err)
+			recoverCtx, recoverCancel := context.WithTimeout(ctx, 60*time.Second)
+			recoverPage := page.Context(recoverCtx)
+			recoverPage.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
+			recoverCancel()
+			page = recoverPage
+			waitForExploreReady(recoverPage, 6*time.Second)
+			pause(300, 700)
+
+			selectedCard, err = b.selectCardForFeed(page, selectedFeed)
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		return err
+	}
 	if err != nil {
 		return err
+	}
+
+	logrus.Info("步骤7后: 检测作者关注状态")
+	followStatus, followErr := b.getFollowStatusInModal(page)
+	if followErr != nil {
+		logrus.Warnf("关注状态检测失败，将按未关注处理并退出: %v", followErr)
+		followStatus = FollowStatusNotFollowed
+	}
+	if followStatus != FollowStatusFollowed && followStatus != FollowStatusMutual {
+		logrus.Info("检测到未关注，停留 2-4 秒后直接退出（不执行互动）")
+		pause(2000, 4000)
+		logrus.Info("步骤10: 关闭笔记弹窗")
+		pause(300, 800)
+		if err := b.closeNoteModal(page); err != nil {
+			logrus.Warnf("关闭笔记弹窗失败，尝试刷新页面: %v", err)
+			fallbackCtx, fallbackCancel := context.WithTimeout(ctx, 60*time.Second)
+			fallbackPage := page.Context(fallbackCtx)
+			fallbackPage.MustNavigate("https://www.xiaohongshu.com/explore").MustWaitLoad()
+			fallbackCancel()
+		} else {
+			logrus.Info("笔记弹窗关闭成功")
+		}
+		waitForNoteModalClosed(page, 3*time.Second)
+		pause(200, 1000)
+		logrus.Info("========== 笔记点击流程完成 ==========")
+		return nil
 	}
 
 	if isRealVideo {
@@ -313,29 +1395,21 @@ func (b *BrowseAction) clickAndViewNote(ctx context.Context, stats *BrowseStats)
 	}
 
 	// 步骤8: 浏览笔记内容
-	logrus.Debug("步骤8: 浏览笔记内容")
+	logrus.Info("步骤8: 浏览笔记内容")
 	if err := b.browseNoteContent(page, feedID, isRealVideo); err != nil {
 		logrus.Warnf("浏览笔记内容出错: %v", err)
 	} else {
-		logrus.Debug("笔记内容浏览完成")
+		logrus.Info("笔记内容浏览完成")
 	}
 
 	// 步骤9: 检查是否需要互动
-	logrus.Debug("步骤9: 检查是否需要互动")
-	if rand.Intn(100) < b.config.InteractProbability {
-		logrus.Info("开始与笔记互动")
-		if err := b.interactWithNote(ctx, feedID, xsecToken, stats); err != nil {
-			logrus.Warnf("与笔记互动出错: %v", err)
-		} else {
-			logrus.Debug("笔记互动完成")
-		}
-	} else {
-		logrus.Info("跳过互动")
-	}
+	logrus.Info("检测到已关注/互关：执行 100% 点赞+收藏")
+	b.forceLikeAndFavoriteInModal(page, feedID, stats)
+	logrus.Info("笔记互动完成")
 
 	// 步骤10: 关闭笔记弹窗（使用自然的方式）
 	logrus.Info("步骤10: 关闭笔记弹窗")
-	time.Sleep(randomDuration(800, 1500))
+	pause(300, 800)
 	if err := b.closeNoteModal(page); err != nil {
 		logrus.Warnf("关闭笔记弹窗失败，尝试刷新页面: %v", err)
 		// 降级方案：刷新页面 - 创建独立的超时 context
@@ -346,7 +1420,8 @@ func (b *BrowseAction) clickAndViewNote(ctx context.Context, stats *BrowseStats)
 	} else {
 		logrus.Info("笔记弹窗关闭成功")
 	}
-	time.Sleep(randomDuration(1000, 2000))
+	waitForNoteModalClosed(page, 3*time.Second)
+	pause(200, 1000)
 
 	logrus.Info("========== 笔记点击流程完成 ==========")
 	return nil
@@ -451,7 +1526,7 @@ func (b *BrowseAction) openNoteFromCard(page *rod.Page, selectedCard *rod.Elemen
 	stepStart := time.Now()
 
 	// 先进行一个短暂的固定等待，模拟首屏渲染
-	time.Sleep(randomDuration(1500, 3000))
+	pause(400, 900)
 
 	maxWait := 4 * time.Second
 	logrus.Debug("开始等待DOM稳定（最多 4 秒用于区分视频/图文）")
@@ -479,7 +1554,6 @@ func (b *BrowseAction) openNoteFromCard(page *rod.Page, selectedCard *rod.Elemen
 
 	return isRealVideo, nil
 }
-
 
 // getFeedsFromPage 从页面的 window.__INITIAL_STATE__ 获取笔记列表
 // 这与项目中其他 MCP 功能（feeds.go, search.go）的实现方式完全一致
@@ -644,16 +1718,18 @@ func (b *BrowseAction) browseNoteContent(page *rod.Page, feedID string, isRealVi
 
 	// 模拟先看标题和文案
 	logrus.Debug(">>> 阅读标题和内容")
-	time.Sleep(randomDuration(2000, 4000))
+	pause(1500, 3000)
 
 	if isRealVideo {
 		// 真视频：不做图片滚动，采用“完整观看/部分观看”策略
 		if rand.Intn(100) < 10 {
 			logrus.Info(">>> 当前笔记为真视频，本次选择完整观看视频，等待视频播放完成")
-			start := time.Now()
-			page.MustWaitDOMStable()
-			watchCost := time.Since(start)
-			logrus.Infof(">>> 视频完整观看结束，等待约 %.1f 秒", watchCost.Seconds())
+			_ = rod.Try(func() {
+				page.Timeout(2 * time.Second).MustWaitDOMStable()
+			})
+			watchDuration := randomDuration(12000, 30000)
+			logrus.Infof(">>> 视频完整观看结束，继续停留约 %.1f 秒", watchDuration.Seconds())
+			time.Sleep(watchDuration)
 		} else {
 			// 90% 概率部分观看：停留 4-9 秒后进入后续操作
 			watchDuration := randomDuration(4000, 9000)
@@ -672,6 +1748,7 @@ func (b *BrowseAction) browseNoteContent(page *rod.Page, feedID string, isRealVi
 
 			// 80% 概率执行图片轮播浏览
 			if rand.Intn(100) < 80 {
+				logrus.Info(">>> 开始浏览轮播图片")
 				if err := b.browseNoteImages(page, imageCount); err != nil {
 					logrus.Warnf(">>> 浏览轮播图片失败: %v", err)
 				}
@@ -685,7 +1762,7 @@ func (b *BrowseAction) browseNoteContent(page *rod.Page, feedID string, isRealVi
 		logrus.Debugf(">>> 准备滚动 %d 次查看正文内容", scrollTimes)
 		for i := 0; i < scrollTimes; i++ {
 			page.Mouse.MustScroll(0, float64(rand.Intn(250)+150))
-			time.Sleep(randomDuration(800, 1500))
+			pause(500, 1100)
 		}
 		logrus.Debug(">>> 正文内容滚动完成")
 	}
@@ -710,7 +1787,7 @@ func (b *BrowseAction) browseNoteContent(page *rod.Page, feedID string, isRealVi
 func (b *BrowseAction) browseNoteImages(page *rod.Page, imageCount int) error {
 	if imageCount <= 1 {
 		logrus.Debug(">>> 仅检测到 1 张图片，停留浏览")
-		time.Sleep(randomDuration(1500, 3000))
+		pause(1000, 2200)
 		return nil
 	}
 
@@ -722,24 +1799,61 @@ func (b *BrowseAction) browseNoteImages(page *rod.Page, imageCount int) error {
 		total = rand.Intn(imageCount-1) + 1
 	}
 
-	// 尝试找到轮播图右侧的箭头按钮
-	rightArrow, err := page.Element(".slider-container .arrow-controller.right")
+	var sliderArea *rod.Element
+	_ = rod.Try(func() {
+		sliderArea = page.Timeout(2 * time.Second).MustElement(".slider-container .note-slider")
+	})
+	if sliderArea == nil {
+		_ = rod.Try(func() {
+			sliderArea = page.Timeout(2 * time.Second).MustElement(".note-slider")
+		})
+	}
+	if sliderArea == nil {
+		_ = rod.Try(func() {
+			sliderArea = page.Timeout(2 * time.Second).MustElement(".slider-container")
+		})
+	}
+	if sliderArea != nil {
+		_ = rod.Try(func() {
+			sliderArea.Timeout(1 * time.Second).MustHover()
+		})
+	}
+
+	// 尝试找到轮播图右侧的箭头按钮（显式超时，避免 Element 默认等待太久导致卡死）
+	var rightArrow *rod.Element
+	var err error
+	err = rod.Try(func() {
+		rightArrow = page.Timeout(2 * time.Second).MustElement(".slider-container .arrow-controller.right")
+	})
 	if err != nil || rightArrow == nil {
-		logrus.Warn(">>> 未找到轮播图右侧箭头，改为停留等待浏览")
-		time.Sleep(randomDuration(1500, 3000))
+		_ = rod.Try(func() {
+			rightArrow = page.Timeout(2 * time.Second).MustElement(".arrow-controller.right")
+		})
+	}
+	if rightArrow == nil {
+		logrus.Warn(">>> 未找到轮播图右侧箭头（已快速超时），改为停留等待浏览")
+		pause(1000, 2200)
 		return nil
 	}
 
 	// 当前图片先停留一段时间
-	time.Sleep(randomDuration(1000, 3000))
+	pause(700, 1600)
 
 	for i := 1; i < total; i++ {
 		// 模拟用户在当前图片上停留一段时间再切下一张
-		time.Sleep(randomDuration(1000, 3000))
+		pause(700, 1800)
 
-		if err := rod.Try(func() {
-			rightArrow.MustClick()
-		}); err != nil {
+		if sliderArea != nil {
+			if err := rod.Try(func() {
+				sliderArea.Timeout(1 * time.Second).MustHover()
+			}); err == nil {
+				scrollAmount := rand.Intn(180) + 120
+				page.Mouse.MustScroll(0, float64(scrollAmount))
+				continue
+			}
+		}
+
+		if err := rightArrow.Timeout(2*time.Second).Click(proto.InputMouseButtonLeft, 1); err != nil {
 			logrus.Warnf(">>> 点击轮播图下一张失败，提前结束轮播浏览: %v", err)
 			break
 		}
@@ -747,7 +1861,6 @@ func (b *BrowseAction) browseNoteImages(page *rod.Page, imageCount int) error {
 
 	return nil
 }
-
 
 // getNoteImageCount 仅通过笔记详情中的轮播组件 DOM 结构获取当前笔记的图片张数
 func (b *BrowseAction) getNoteImageCount(page *rod.Page, _ string) (int, error) {
@@ -897,7 +2010,6 @@ func (b *BrowseAction) scrollCommentArea(page *rod.Page) error {
 	return nil
 }
 
-
 // scrollCommentAreaIntoView 将评论区滚动到视口中，包含无法精确定位时的降级逻辑
 func (b *BrowseAction) scrollCommentAreaIntoView(page *rod.Page) {
 	logrus.Info("评论区不在视口中，先滚动到评论区位置")
@@ -927,13 +2039,13 @@ func (b *BrowseAction) scrollCommentAreaIntoView(page *rod.Page) {
 	}`).Bool()
 
 	// 等待滚动完成
-	time.Sleep(randomDuration(1500, 2500))
+	pause(800, 1500)
 
 	if !scrolledToComment {
 		logrus.Warn("无法精确定位评论区，使用通用滚动")
 		// 降级方案：通用滚动
 		page.Mouse.MustScroll(0, float64(rand.Intn(400)+300))
-		time.Sleep(randomDuration(1000, 2000))
+		pause(700, 1500)
 	}
 }
 
@@ -952,7 +2064,7 @@ func (b *BrowseAction) performCommentScrolling(page *rod.Page) {
 		// 执行滚动
 		scrollAmount := rand.Intn(400) + 300 // 300-700像素
 		page.Mouse.MustScroll(0, float64(scrollAmount))
-		time.Sleep(randomDuration(1200, 2500))
+		pause(700, 1500)
 
 		// 获取滚动后的位置
 		afterScroll, err := b.getScrollPosition(page)
@@ -970,7 +2082,7 @@ func (b *BrowseAction) performCommentScrolling(page *rod.Page) {
 				logrus.Info("回滚评论区")
 				backAmount := rand.Intn(300) + 200 // 回滚200-500像素
 				page.Mouse.MustScroll(0, float64(-backAmount))
-				time.Sleep(randomDuration(800, 1500))
+				pause(500, 1000)
 			}
 			break
 		}
@@ -986,46 +2098,7 @@ var (
 		"[class*='comment-item']",           // 包含comment-item的class
 		".comment-list .item",               // 评论列表项
 	}
-
-	// commentTextSelectors 用于从评论区提取评论文本
-	commentTextSelectors = []string{
-		".comment-item .content",           // 评论内容
-		".comment-item .text",              // 评论文本
-		"[class*='comment'] .content",      // 包含comment的class的内容
-		"[class*='comment-item'] .content", // 评论项的内容
-		".comment-list .item .content",     // 评论列表项的内容
-	}
-
-	// commentInputSelectors 用于在弹窗内找到评论输入框
-	commentInputSelectors = []string{
-		"div.input-box div.content-edit span",                    // 详情页选择器（来自comment_feed.go）
-		".note-detail-modal div.input-box div.content-edit span", // 弹窗内选择器
-		".modal div.input-box div.content-edit span",             // 通用弹窗选择器
-		".comment-input span",                                   // 简化选择器
-		"[placeholder*='评论']",                                  // 通过placeholder查找
-	}
-
-	// commentTextInputSelectors 用于找到实际文本输入元素
-	commentTextInputSelectors = []string{
-		"div.input-box div.content-edit p.content-input",                    // 详情页选择器
-		".note-detail-modal div.input-box div.content-edit p.content-input", // 弹窗内选择器
-		".modal div.input-box div.content-edit p.content-input",             // 通用弹窗选择器
-		".content-input",                                                    // 简化选择器
-		"textarea",                                                          // 通用textarea
-		"input[type='text']",                                               // 通用文本输入
-	}
-
-	// commentSubmitSelectors 用于找到评论提交按钮
-	commentSubmitSelectors = []string{
-		"div.bottom button.submit",                    // 详情页选择器
-		".note-detail-modal div.bottom button.submit", // 弹窗内选择器
-		".modal div.bottom button.submit",             // 通用弹窗选择器
-		"button.submit",                               // 简化选择器
-		"button[type='submit']",                       // 通用提交按钮
-		"button:contains('发布')",                      // 通过文本查找
-	}
 )
-
 
 // hasComments 检查评论区是否有评论
 func (b *BrowseAction) hasComments(page *rod.Page) (bool, error) {
@@ -1097,10 +2170,10 @@ func (b *BrowseAction) closeNoteModal(page *rod.Page) error {
 
 	// 尝试多种可能的遮罩层选择器
 	maskSelectors := []string{
-		"div.close", // 关闭按钮
-		"div[class*='mask']", // 遮罩层
+		"div.close",             // 关闭按钮
+		"div[class*='mask']",    // 遮罩层
 		"div[class*='overlay']", // 覆盖层
-		".note-detail-mask", // 笔记详情遮罩
+		".note-detail-mask",     // 笔记详情遮罩
 	}
 
 	for _, selector := range maskSelectors {
@@ -1128,186 +2201,34 @@ func (b *BrowseAction) closeNoteModal(page *rod.Page) error {
 	return nil
 }
 
-// interactWithNote 与笔记互动（点赞、收藏、评论一起执行）
-// 注意：这里使用专门的弹窗内互动功能，不会跳转页面
-// 与现有的详情页互动功能（like_favorite.go、comment_feed.go）使用相同的选择器
-// 但直接在当前弹窗内操作，保持用户体验的自然性
-func (b *BrowseAction) interactWithNote(ctx context.Context, feedID, xsecToken string, stats *BrowseStats) error {
-	if feedID == "" || xsecToken == "" {
-		return fmt.Errorf("缺少笔记信息")
-	}
-
-	logrus.Infof("开始与笔记互动: %s", feedID)
-	page := b.page.Context(ctx)
-
-    // 在弹窗内进行点赞（不跳转页面）
-    if err := b.likeInModal(page); err != nil {
-		logrus.Warnf("点赞失败: %v", err)
-	} else {
-		stats.LikeCount++
-		logrus.Debug("点赞成功")
-        // 点赞后延迟 0.5-3.0 秒再进行后续操作
-        time.Sleep(randomDuration(500, 3000))
-	}
-
-    // 根据配置的 LikeOnlyProbability 决定本次是否只点赞不收藏
-	onlyLike := rand.Intn(100) < b.config.LikeOnlyProbability
-	if onlyLike {
-		logrus.Infof("本次互动采用仅点赞模式，跳过收藏（概率=%d%%）", b.config.LikeOnlyProbability)
-	} else {
-		// 在弹窗内进行收藏（不跳转页面）
-		if err := b.favoriteInModal(page); err != nil {
-			logrus.Warnf("收藏失败: %v", err)
-		} else {
-			stats.FavoriteCount++
-			logrus.Debug("收藏成功")
-			// 收藏后延迟 1-3 秒再进行评论
-			time.Sleep(randomDuration(1000, 3000))
-		}
-	}
-
-	// 在弹窗内进行评论
-	// 判断是否需要评论：
-	// 1. 如果 EnableComment 为 false，则不评论
-	// 2. 如果 EnableComment 为 true 或 nil（默认），则评论
-	shouldComment := b.config.EnableComment == nil || *b.config.EnableComment
-
-	if !shouldComment {
-		logrus.Info("评论功能已禁用，跳过评论")
-	} else if rand.Intn(100) < 50 { // 50% 概率评论
-		var comment string
-
-		// 如果用户提供了评论内容，使用用户提供的
-		if len(b.config.Comments) > 0 {
-			comment = b.config.Comments[rand.Intn(len(b.config.Comments))]
-			logrus.Info("使用用户提供的评论内容")
-		} else {
-			// 否则从评论区自动获取
-			var err error
-			comment, err = b.getRandomCommentText(page)
-			if err != nil || comment == "" {
-				logrus.Warnf("从评论区获取评论失败，跳过评论: %v", err)
-			} else {
-				logrus.Info("从评论区自动获取评论内容")
-			}
-		}
-
-		// 执行评论
-		if comment != "" {
-			if err := b.commentInModal(page, comment); err != nil {
-				logrus.Warnf("评论失败: %v", err)
-			} else {
-				stats.CommentCount++
-				logrus.Debugf("评论成功: %s", comment)
-				time.Sleep(randomDuration(800, 1500))
-			}
-		}
-	}
-
-	return nil
-}
-
-// getRandomCommentText 从评论区获取一条随机评论的文本内容
-func (b *BrowseAction) getRandomCommentText(page *rod.Page) (string, error) {
-	logrus.Debug("尝试从评论区获取评论文本")
-
-	// 使用统一定义的评论文本选择器集合
-
-	var allComments []*rod.Element
-
-	// 尝试所有选择器
-	for _, selector := range commentTextSelectors {
-		elements, err := page.Elements(selector)
-		if err == nil && len(elements) > 0 {
-			allComments = append(allComments, elements...)
-		}
-	}
-
-	// 如果没找到，尝试通过JavaScript获取
-	if len(allComments) == 0 {
-		commentTexts := page.MustEval(`() => {
-			const comments = [];
-			const commentElements = document.querySelectorAll('[class*="comment"]');
-
-			for (let elem of commentElements) {
-				// 查找包含评论文本的子元素
-				const textElem = elem.querySelector('.content') ||
-				                 elem.querySelector('.text') ||
-				                 elem.querySelector('[class*="content"]');
-
-				if (textElem && textElem.innerText) {
-					const text = textElem.innerText.trim();
-					// 过滤掉太短或太长的评论
-					if (text.length >= 5 && text.length <= 100) {
-						comments.push(text);
-					}
-				}
-			}
-
-			return comments;
-		}`).Arr()
-
-		if len(commentTexts) > 0 {
-			// 随机选择一条评论
-			randomIndex := rand.Intn(len(commentTexts))
-			commentText := commentTexts[randomIndex].String()
-			logrus.Debugf("从JavaScript获取到评论: %s", commentText)
-			return commentText, nil
-		}
-
-		logrus.Debug("评论区没有找到评论文本")
-		return "", fmt.Errorf("评论区没有找到评论文本")
-	}
-
-	// 从找到的评论元素中随机选择一个
-	randomComment := allComments[rand.Intn(len(allComments))]
-
-	// 获取评论文本
-	commentText, err := randomComment.Text()
-	if err != nil {
-		return "", fmt.Errorf("获取评论文本失败: %v", err)
-	}
-
-	commentText = strings.TrimSpace(commentText)
-
-	// 过滤掉太短或太长的评论
-	if len(commentText) < 5 {
-		logrus.Info("评论文本太短，重新获取")
-		return "", fmt.Errorf("评论文本太短")
-	}
-	if len(commentText) > 100 {
-		// 截取前100个字符
-		runes := []rune(commentText)
-		if len(runes) > 100 {
-			commentText = string(runes[:100])
-		}
-	}
-
-	logrus.Infof("从评论区获取到评论: %s", commentText)
-	return commentText, nil
-}
-
 // likeInModal 在弹窗内进行点赞操作
 func (b *BrowseAction) likeInModal(page *rod.Page) error {
+	modal, err := b.getNoteModalRoot(page)
+	if err != nil {
+		return err
+	}
+
 	// 使用与详情页相同的选择器，但不跳转页面
 	// 选择器来自 like_favorite.go 中的 SelectorLikeButton
 	selector := ".interact-container .left .like-lottie"
 
 	// 尝试多个可能的点赞按钮选择器（弹窗内可能略有不同）
 	selectors := []string{
-		selector,                                    // 详情页选择器
-		".note-detail-modal .interact-container .left .like-lottie", // 弹窗内选择器
-		".modal .interact-container .left .like-lottie",             // 通用弹窗选择器
-		".like-lottie",                             // 简化选择器
-		"[class*='like']",                          // 包含like的class
+		selector,          // 详情页选择器
+		".like-lottie",    // 简化选择器
+		"[class*='like']", // 包含like的class（已限定在弹窗容器内）
 	}
 
 	for _, sel := range selectors {
-		if elem, err := page.Element(sel); err == nil {
+		if elem, err := modal.Element(sel); err == nil {
 			if visible, _ := elem.Visible(); visible {
+				if isPressedLikeOrCollect(elem) {
+					return nil
+				}
 				logrus.Debugf("使用选择器点赞: %s", sel)
-				elem.MustClick()
-				return nil
+				if err := elem.Timeout(2*time.Second).Click(proto.InputMouseButtonLeft, 1); err == nil {
+					return nil
+				}
 			}
 		}
 	}
@@ -1317,25 +2238,32 @@ func (b *BrowseAction) likeInModal(page *rod.Page) error {
 
 // favoriteInModal 在弹窗内进行收藏操作
 func (b *BrowseAction) favoriteInModal(page *rod.Page) error {
+	modal, err := b.getNoteModalRoot(page)
+	if err != nil {
+		return err
+	}
+
 	// 使用与详情页相同的选择器，但不跳转页面
 	// 选择器来自 like_favorite.go 中的 SelectorCollectButton
 	selector := ".interact-container .left .reds-icon.collect-icon"
 
 	// 尝试多个可能的收藏按钮选择器（弹窗内可能略有不同）
 	selectors := []string{
-		selector,                                    // 详情页选择器
-		".note-detail-modal .interact-container .left .reds-icon.collect-icon", // 弹窗内选择器
-		".modal .interact-container .left .reds-icon.collect-icon",             // 通用弹窗选择器
-		".collect-icon",                            // 简化选择器
-		"[class*='collect']",                       // 包含collect的class
+		selector,             // 详情页选择器
+		".collect-icon",      // 简化选择器
+		"[class*='collect']", // 包含collect的class（已限定在弹窗容器内）
 	}
 
 	for _, sel := range selectors {
-		if elem, err := page.Element(sel); err == nil {
+		if elem, err := modal.Element(sel); err == nil {
 			if visible, _ := elem.Visible(); visible {
+				if isPressedLikeOrCollect(elem) {
+					return nil
+				}
 				logrus.Debugf("使用选择器收藏: %s", sel)
-				elem.MustClick()
-				return nil
+				if err := elem.Timeout(2*time.Second).Click(proto.InputMouseButtonLeft, 1); err == nil {
+					return nil
+				}
 			}
 		}
 	}
@@ -1343,78 +2271,59 @@ func (b *BrowseAction) favoriteInModal(page *rod.Page) error {
 	return fmt.Errorf("未找到收藏按钮")
 }
 
-// commentInModal 在弹窗内进行评论操作
-func (b *BrowseAction) commentInModal(page *rod.Page, content string) error {
-	// 使用统一定义的评论输入框选择器集合
-
-	// 先点击评论输入框
-	var inputElem *rod.Element
-	for _, sel := range commentInputSelectors {
-		if elem, err := page.Element(sel); err == nil {
-			if visible, _ := elem.Visible(); visible {
-				logrus.Debugf("找到评论输入框: %s", sel)
-				elem.MustClick()
-				inputElem = elem
-				break
-			}
-		}
-	}
-
-	if inputElem == nil {
-		return fmt.Errorf("未找到评论输入框")
-	}
-
-	time.Sleep(randomDuration(300, 600))
-
-	// 使用统一定义的文本输入框选择器集合
-
-	var textElem *rod.Element
-	for _, sel := range commentTextInputSelectors {
-		if elem, err := page.Element(sel); err == nil {
-			if visible, _ := elem.Visible(); visible {
-				logrus.Debugf("找到文本输入框: %s", sel)
-				textElem = elem
-				break
-			}
-		}
-	}
-
-	if textElem == nil {
-		return fmt.Errorf("未找到文本输入框")
-	}
-
-	// 输入评论内容
-	textElem.MustInput(content)
-	time.Sleep(randomDuration(500, 1000))
-
-	// 使用统一定义的评论提交按钮选择器集合
-
-	for _, sel := range commentSubmitSelectors {
-		if elem, err := page.Element(sel); err == nil {
-			if visible, _ := elem.Visible(); visible {
-				logrus.Debugf("找到提交按钮: %s", sel)
-				elem.MustClick()
-				return nil
-			}
-		}
-	}
-
-	return fmt.Errorf("未找到提交按钮")
-}
-
 // randomDuration 生成随机时长（毫秒）
 func randomDuration(min, max int) time.Duration {
 	return time.Duration(rand.Intn(max-min+1)+min) * time.Millisecond
 }
 
-// randomRefreshInterval 生成随机的页面刷新间隔（2-5分钟）
+func pause(minMs, maxMs int) {
+	time.Sleep(randomDuration(minMs, maxMs))
+}
+
+func waitForExploreReady(page *rod.Page, timeout time.Duration) {
+	end := time.Now().Add(timeout)
+	for time.Now().Before(end) {
+		ok := false
+		_ = rod.Try(func() {
+			ok = page.Timeout(800 * time.Millisecond).MustEval(`() => document.querySelectorAll('section.note-item').length > 0`).Bool()
+		})
+		if ok {
+			return
+		}
+		time.Sleep(120 * time.Millisecond)
+	}
+}
+
+func waitForNoteModalClosed(page *rod.Page, timeout time.Duration) {
+	end := time.Now().Add(timeout)
+	for time.Now().Before(end) {
+		closed := true
+		_ = rod.Try(func() {
+			closed = page.Timeout(800 * time.Millisecond).MustEval(`() => {
+				const m = document.querySelector('.note-detail-modal') || document.querySelector('.modal') || document.querySelector('[class*="detail"]');
+				if (!m) return true;
+				const rect = m.getBoundingClientRect();
+				if (!rect || rect.width <= 0 || rect.height <= 0) return true;
+				const s = window.getComputedStyle(m);
+				if (!s) return false;
+				if (s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity || '1') === 0) return true;
+				return false;
+			}`).Bool()
+		})
+		if closed {
+			return
+		}
+		time.Sleep(120 * time.Millisecond)
+	}
+}
+
+// randomRefreshInterval 生成随机的页面刷新间隔（1-3分钟）
 // 模拟真实用户习惯：每隔几分钟刷新推荐页以获取新内容
 func randomRefreshInterval() time.Duration {
-	// 随机生成 2-5 分钟的间隔
-	minutes := rand.Intn(4) + 2 // 2, 3, 4, 5
-	// 再加上一些随机秒数，让时间更自然 (0-59秒)
-	seconds := rand.Intn(60)
+	// 随机生成 1-3 分钟的间隔
+	minutes := rand.Intn(3) + 1 // 1, 2, 3
+	// 再加上一些随机秒数，让时间更自然 (0-30秒)
+	seconds := rand.Intn(31)
 	totalSeconds := minutes*60 + seconds
 	return time.Duration(totalSeconds) * time.Second
 }
-

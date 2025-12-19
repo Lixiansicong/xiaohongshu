@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"os"
 
 	"github.com/go-rod/rod"
 	"github.com/sirupsen/logrus"
@@ -14,10 +15,20 @@ import (
 
 func main() {
 	var (
-		binPath string // 浏览器二进制文件路径
+		binPath      string // 浏览器二进制文件路径
+		resetCookies bool
 	)
 	flag.StringVar(&binPath, "bin", "", "浏览器二进制文件路径")
+	flag.BoolVar(&resetCookies, "reset-cookies", false, "启动前清理 cookies 文件并重新登录")
 	flag.Parse()
+
+	if resetCookies {
+		cookiePath := cookies.GetCookiesFilePath()
+		if err := os.Remove(cookiePath); err != nil && !os.IsNotExist(err) {
+			logrus.Fatalf("failed to remove cookies file %s: %v", cookiePath, err)
+		}
+		logrus.Infof("cookies 已清理: %s", cookiePath)
+	}
 
 	// 登录的时候，需要界面，所以不能无头模式
 	b := browser.NewBrowser(false, browser.WithBinPath(binPath))

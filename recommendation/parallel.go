@@ -73,7 +73,9 @@ func RunParallelBrowse(ctx context.Context, config xiaohongshu.BrowseConfig, ins
             loggedIn, err := loginAction.CheckLoginStatus(ctx)
             if err == nil && loggedIn {
                 logrus.WithField("instance", res.InstanceID).Info("检测到已登录，直接开始浏览")
-                browseAction := xiaohongshu.NewBrowseAction(page, config)
+                cfg := config
+                cfg.InstanceID = res.InstanceID
+                browseAction := xiaohongshu.NewBrowseAction(page, cfg)
                 stats, browseErr := browseAction.StartBrowse(ctx)
                 if browseErr != nil {
                     res.Error = browseErr.Error()
@@ -106,7 +108,9 @@ func RunParallelBrowse(ctx context.Context, config xiaohongshu.BrowseConfig, ins
             }
 
             // 开始浏览推荐页
-            browseAction := xiaohongshu.NewBrowseAction(page, config)
+            cfg := config
+            cfg.InstanceID = res.InstanceID
+            browseAction := xiaohongshu.NewBrowseAction(page, cfg)
             stats, browseErr := browseAction.StartBrowse(ctx)
             if browseErr != nil {
                 res.Error = browseErr.Error()
